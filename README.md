@@ -24,26 +24,28 @@
 - **访问控制**：`allowFrom`（C2C openid）/ `groupAllowFrom`（群 openid）白名单，`'*'` 通配，留空放行。
 - **审批桥（inline keyboard）**：为每个 QQ 会话注册 agent 作用域 `approval/request` answerer —— 审批请求以三按钮消息送达 QQ（✅ 允许一次 / ⭐ 始终允许 / ❌ 拒绝），按钮回调即决策；"始终允许"按 会话×工具 持久化（`qq-always-allow.json`）。
 - **QQ API 代理工具**：`qq_api` 工具代理任意 QQ 开放平台 REST 调用（频道/群管理、公告、日程等），自动注入鉴权。
-- **斜杠命令**：`/help` `/ping` `/me` `/approve ask|never|status` `/always clear`（在投递给 agent 之前拦截，映射 DSH 审批策略）。
+- **斜杠命令**：`/help` `/ping` `/me` `/new` `/approve ask|never|status` `/always clear`（在投递给 agent 之前拦截，映射 DSH 审批策略；完整列表见下节）。
 - **定时提醒**：复用 DSH schedule 子系统（web profile 自带 `schedule_create` 等工具）；提醒到期触发同会话 follow-up，回复经出站管线（含主动降级）送达 QQ。
 
 ### 明确不迁移（平台强绑定或 DSH 已覆盖）
 Webhook transport、热升级（`/bot-upgrade`/update-checker）、`/bot-logs`/`/bot-version`/`/bot-clear-storage`（DSH Web UI 承担）、pairing 配对流、credential-backup、claw_cfg 私有协议、群自主模式（需 QQ 特批 `GROUP_MESSAGE_CREATE`）、群历史缓冲注入（DSH 会话日志已持久化完整上下文）。
 
-## 项目结构
+## 斜杠命令
 
-```
-src/
-  index.ts    组合根：Config、生命周期、DSH 记账（unarchive/workspace attach）、事件接线
-  types.ts    共享类型 + DSH 宿主服务结构声明（file:// 加载无法 import DSH 包）
-  qqapi.ts    QQ OpenAPI 客户端：token/文本/键盘/typing/媒体(直传+分片)/流式帧/交互 ack/原始代理
-  gateway.ts  WebSocket 网关：identify/心跳/RESUME/重连退避/事件分发
-  refindex.ts 引用索引：LRU + JSONL append + compact
-  store.ts    RouteStore（会话→路由/被动计数）+ AlwaysAllowStore，原子写
-  inbound.ts  入站管线：去重→白名单→@清洗→引用→附件(图片/语音/文件)→命令→typing→agent
-  outbound.ts 出站管线：chunk 流式/防抖合并/分段/typing 生命周期/审批 answerer
-  tools.ts    agent 作用域工具：qq_send_media、qq_api
-```
+在投递给 agent 之前由本插件直接拦截并响应（`slashCommands: false` 时整组关闭）。所有命令都以行首 `/` 触发，参数以空白分隔。
+
+| 命令 | 参数 | 说明 |
+|------|------|------|
+| `/help` | — | 在 QQ 内列出全部可用斜杠命令。 |
+| `/ping` | — | 立即返回 `✅ pong（HH:MM:SS）`，用于延迟/可达性自检。 |
+| `/me` | — | 返回当前会话发送者的 `openid`（可选附带昵称），便于排查白名单。 |
+| `/new` | — | 强制关闭当前 thread 上的流式回复（`stream_messages` DONE 帧）并取消进行中的 agent，再为同一会话目标分配下一个 thread id（`#n1`、`#n2` …）；旧 session 保留，仍可在侧边栏切换。 |
+| `/approve` | `ask` \| `never` \| `status`（缺省 `status`） | `ask`/`never` 切换当前会话的审批策略（仅当 `approval: true` 且当前环境提供了 `approval` 服务时生效）；`status` 列出本会话已"始终允许"的工具名。 |
+| `/always` | `clear` | 清空本会话的"始终允许"清单；其它子命令视为未识别并回落到 agent。 |
+
+> 未识别的命令（例如 `/foo`）会被原样转发给 agent，不会被插件吞掉。
+
+实现位于 [`src/slash-commands.ts`](src/slash-commands.ts)，仅依赖注入式的 `SlashDeps`；测试 / 单元化时可直接传入 fake 依赖调用，无需启动 WebSocket。
 
 ## 接入指南
 
@@ -82,7 +84,7 @@ pnpm install && pnpm run build
         mediaDownload: true        # 非图片附件落盘 <cwd>/.qq-media/
         approval: true             # QQ 内联键盘审批
         approvalTimeoutMs: 300000  # 审批等待超时
-        slashCommands: true        # /help /ping /me /approve /always
+        slashCommands: true        # /help /ping /me /new /approve /always
         # stt:                     # 可选：语音转写（OpenAI 兼容）
         #   baseUrl: 'https://api.openai.com/v1'
         #   apiKey: 'sk-...'
