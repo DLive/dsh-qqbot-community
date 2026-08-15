@@ -54,6 +54,7 @@ lerna-debug.log*
 .cache/
 .temp/
 .tmp/
+.pnpm-store/
 .parcel-cache/
 .eslintcache
 .stylelintcache
@@ -79,9 +80,10 @@ ehthumbs.db
 Desktop.ini
 
 # ── Optional npm / yarn / pnpm metadata (uncomment if not used) ──────────────
+# This project is managed with pnpm; pnpm-lock.yaml is tracked.
+# Disable if you opt into another package manager.
 # npm
+package-lock.json
 npm-shrinkwrap.json
 # yarn
 yarn.lock
-# pnpm
-pnpm-lock.yaml

@@ -1,8 +1,23 @@
 # QQ 官方机器人适配器 (dsh-qqbot-community)
 
+[![npm version](https://img.shields.io/npm/v/dsh-qqbot-community)](https://www.npmjs.com/package/dsh-qqbot-community)
+[![license](https://img.shields.io/npm/l/dsh-qqbot-community)](./LICENSE)
+
 为 DeepSeek Harness 提供 QQ 官方机器人的接入能力。本项目由 `openclaw-qqbot` 插件功能迁移而来。
 
 > 整体功能未严格测试，部分功能可能不稳定，欢迎反馈问题，或者直接提交 PR。
+
+## 安装
+
+```bash
+npm install dsh-qqbot-community
+```
+
+> 该包以 npm 形式分发，供宿主消费。如需从源码构建/调试，参见下文「接入指南」。
+
+### 致谢与来源
+
+本插件的核心接入、网关与会话管理逻辑源自 [`openclaw-qqbot`](https://github.com/openclaw/openclaw-qqbot) 项目，遵循原项目的 MIT 许可证。在此向原作者与贡献者致谢。
 
 ## 功能特性
 
@@ -49,47 +64,68 @@ Webhook transport、热升级（`/bot-upgrade`/update-checker）、`/bot-logs`/`
 
 ## 接入指南
 
-### 1. 安装依赖与构建
+本包以 [DSH bundle](https://github.com/deepseek-harness/deepseek-harness/blob/main/docs/user/develop/basic/publish.md) 形式分发 —— `package.json` 声明 `dsh.bundle.patch`，仓库根的 `cordis.patch.yml` 是该 bundle 的默认配置层。用户通过 `dsh plugin add` 一行安装，DSH 自动把它加入 `~/.dsh/profiles/<name>/package.json` 的 `dsh.profile.bundles` 列表，并在下次启动时作为独立一层叠加。
+
+### 1. 安装到 profile
 
 ```bash
-pnpm install && pnpm run build
+# 从 npm 安装（正式用户）
+dsh plugin --profile web add dsh-qqbot-community
+
+# 从 GitHub / 本地 checkout 安装（开发/调试）
+dsh plugin --profile web add github:DLive/dsh-qqbot-community
+dsh plugin --profile web add /path/to/dsh-qqbot-community
+
+# 安装后核对：bundle 已被识别为独立一层
+dsh --profile web --dump-config | grep -A2 "dsh-qqbot-community"
 ```
 
-> 使用 `npm install`（而非 pnpm）：本插件经 `file://` 独立加载，需自带 `node_modules`。
+### 2. 在 profile 的 `cordis.patch.yml` 覆盖默认配置
 
-### 2. 配置（~/.dsh/profiles/web/cordis.patch.yml）
+DSH 的层顺序是：每个 bundle 的 patch → profile 的 `cordis.patch.yml` → home 级 `cordis.patch.yml` → `--patch` 覆盖层。后者覆盖前者，所以用户在自己 profile 的 patch 文件里补 QQ 凭证即可，不需要改 bundle。
+
+编辑 `~/.dsh/profiles/web/cordis.patch.yml`，在已有内容末尾追加（**不要**覆盖文件里已有的其它 patch）：
 
 ```yaml
-- insert:
-    - id: qqbot-community
-      name: /xxxxx/dsh-qqbot-community/lib/index.js #插件路径
-      config:
-        id: '你的 AppID'        # 必须加引号（避免 YAML 数字解析）
-        secret: '你的 AppSecret'
-        sandbox: true
-        provider: 'deepseek'
-        model: 'deepseek-chat'
-        cwd: '/Users/xxxx/your-project'   # QQ 会话 agent 工作目录（须真实存在）
-        # 以下均可省略，以下为默认值
-        allowFrom: ['*']           # C2C 白名单；填 openid 数组限定用户
-        groupAllowFrom: ['*']      # 群白名单
-        markdown: false            # msg_type 2，需开通 markdown 权限
-        typing: true               # C2C 输入中指示
-        streaming: true            # C2C 流式回复
-        streamThrottleMs: 1200     # 流式帧节流
-        deliverWindowMs: 900       # 轮内回复合并窗口
-        deliverMaxWaitMs: 6000     # 合并最大等待
-        textChunkLimit: 4000       # 单条静态回复上限
-        replyPassiveLimit: 4       # 每条消息被动回复上限
-        mediaDownload: true        # 非图片附件落盘 <cwd>/.qq-media/
-        approval: true             # QQ 内联键盘审批
-        approvalTimeoutMs: 300000  # 审批等待超时
-        slashCommands: true        # /help /ping /me /new /approve /always
-        # stt:                     # 可选：语音转写（OpenAI 兼容）
-        #   baseUrl: 'https://api.openai.com/v1'
-        #   apiKey: 'sk-...'
-        #   model: 'whisper-1'
+- id: qqbot-community
+  name: dsh-qqbot-community
+  config:
+    id: '你的 AppID'        # 必须加引号（避免 YAML 数字解析）
+    secret: '你的 AppSecret'
+    sandbox: true
+    provider: 'DeepSeek' # 新建会话默认提供商
+    model: 'DeepSeek-V4-Flash' # 新建会话默认模型
+    cwd: '/Users/xxxx/your-project'   # QQ 会话 agent 工作目录（须真实存在）
+    # 以下均可省略，以下为默认值
+    allowFrom: ['*']           # C2C 白名单；填 openid 数组限定用户
+    groupAllowFrom: ['*']      # 群白名单
+    markdown: false            # msg_type 2，需开通 markdown 权限
+    typing: true               # C2C 输入中指示
+    streaming: true            # C2C 流式回复
+    streamThrottleMs: 1200     # 流式帧节流
+    deliverWindowMs: 900       # 轮内回复合并窗口
+    deliverMaxWaitMs: 6000     # 合并最大等待
+    textChunkLimit: 4000       # 单条静态回复上限
+    replyPassiveLimit: 4       # 每条消息被动回复上限
+    mediaDownload: true        # 非图片附件落盘 <cwd>/.qq-media/
+    approval: true             # QQ 内联键盘审批
+    approvalTimeoutMs: 300000  # 审批等待超时
+    slashCommands: true        # /help /ping /me /new /approve /always
+    # stt:                     # 可选：语音转写（OpenAI 兼容）
+    #   baseUrl: 'https://api.openai.com/v1'
+    #   apiKey: 'sk-...'
+    #   model: 'whisper-1'
 ```
+
+> 如果你只想临时调试本仓库代码、不走 npm，也可以在不修改 profile 的前提下用 `--patch` 直接喂这份 patch 给 dsh：
+>
+> ```bash
+> cd /path/to/dsh-qqbot-community
+> pnpm install && pnpm run build
+> dsh web --patch ./cordis.patch.yml
+> ```
+>
+> 这条路径绕开 `dsh plugin` 的依赖管理，仅适合本地开发。
 
 ### 3. 启动
 

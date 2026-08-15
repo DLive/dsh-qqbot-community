@@ -1,15 +1,50 @@
 {
   "name": "dsh-qqbot-community",
   "version": "1.0.0",
-  "description": "QQ Bot for DeepSeek Harness (migrated from openclaw-qqbot)",
-  "homepage": "https://github.com/DLive/dsh-qqbot-community",
+  "description": "QQ Official Bot adapter for DeepSeek Harness (migrated from openclaw-qqbot)",
+  "homepage": "https://github.com/DLive/dsh-qqbot-community#readme",
   "license": "MIT",
   "author": "DLive",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
+  "files": [
+    "lib",
+    "README.md",
+    "LICENSE",
+    "cordis.patch.yml"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "cordis",
+    "qq-bot",
+    "qqbot",
+    "qq-official-bot"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/DLive/dsh-qqbot-community.git"
+  },
+  "bugs": {
+    "url": "https://github.com/DLive/dsh-qqbot-community/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "packageManager": "pnpm@10.33.2",
   "scripts": {
     "build": "tsc",
+    "clean": "rm -rf lib *.tsbuildinfo",
+    "prepublishOnly": "pnpm run clean && pnpm run build",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "dependencies": {
