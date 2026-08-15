@@ -19,6 +19,10 @@ export const Config = Schema.object({
   provider: Schema.string().default('DeepSeek').description('新建 QQ 会话默认 AI 提供方'),
   model: Schema.string().default('DeepSeek-V4-Flash').description('新建 QQ 会话默认模型'),
   cwd: Schema.string().description('新建 QQ 会话的绝对工作目录'),
+  agentPreset: Schema.string().default('standard').description(
+    'QQ 会话使用的 agent preset id（决定工具、提示词、技能）。'
+    + '缺省值 standard；可改为 code / minimal / cordis 或用户自定义 id。',
+  ),
   debug: Schema.boolean().default(false).description('调试日志'),
   allowFrom: Schema.array(Schema.string()).default(['*']).description("C2C 发送者 openid 白名单（'*' 通配，留空放行）"),
   groupAllowFrom: Schema.array(Schema.string()).default(['*']).description('群 openid 白名单'),

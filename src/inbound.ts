@@ -502,7 +502,9 @@ export class InboundPipeline {
       this.deps.log.info('QQ ensureAgent: creating agent for %s', sessionId)
       creation = (async () => {
         const setup = this.setupAgent !== undefined
-          ? (agentCtx: Context): void => { this.setupAgent?.(agentCtx, sessionId) }
+          ? async (agentCtx: Context): Promise<void> => {
+            await this.setupAgent?.(agentCtx, sessionId)
+          }
           : undefined
         try {
           return (await this.deps.agents.resume({

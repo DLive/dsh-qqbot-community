@@ -24,6 +24,7 @@ npm install dsh-qqbot-community
 ### 基础
 - **消息收发**：频道 `@机器人`、群聊 `@机器人` 和单聊消息。
 - **会话管理**：按频道、群或单聊用户创建或恢复独立的 Agent 会话（cwd 对齐持久化 header，工作区分组，归档自动恢复）。
+- **Agent preset 挂载**：每个 QQ 会话在 setup 阶段自动 `agentPresets.mount()` 加入预设（默认 `standard`，用 `agentPreset` 配置可换成 `code` / `minimal` / `cordis` 或任意用户自定义 id），恢复持久会话时沿用 header 中记录的 preset —— 因此 QQ 里的 agent 与 Web UI 拥有同一套工具（bash / 文件 / 代码运行等）和提示词，仅追加 `qq_send_media` / `qq_api` 等 QQ 专属工具。
 - **沙箱支持**：开启后使用 QQ 官方沙箱 OpenAPI 接入点。
 - **网关可靠性**：WebSocket 心跳、断线重连退避、**会话 RESUME**（session_id + seq 持久化，重启不重放事件）。
 - **@mention 清洗**：`<@!openid>` → `@昵称`，机器人自身提及剔除（群/频道消息友好）。
@@ -105,6 +106,7 @@ DSH 的层顺序是：每个 bundle 的 patch → profile 的 `cordis.patch.yml`
     sandbox: true
     provider: 'DeepSeek' # 新建会话默认提供商
     model: 'DeepSeek-V4-Flash' # 新建会话默认模型
+    agentPreset: 'standard'    # preset id：standard / code / minimal / cordis / 自定义；缺省值 standard
     cwd: '/Users/xxxx/workdir'   # QQ 会话 agent 工作区目录（须真实存在）
     # 以下均可省略，以下为默认值
     allowFrom: ['*']           # C2C 白名单；填 openid 数组限定用户
@@ -161,3 +163,4 @@ dsh web
 - **图片模型看不到**：确认 DSH 挂载 attachment 服务（web profile 默认有）；不支持格式自动回退为路径注入。
 - **审批按钮无响应**：确认开通按钮权限；`/approve status` 查看始终允许清单；超时默认 5 分钟自动拒绝。
 - **`Error: duplicate loader entry id: qqbot-community`**：合并后的 entry 树里出现了两个同 id 的 row。常见原因有两个：(1) 用户 `cordis.patch.yml` 里写了 `- insert: [{ id: qqbot-community, ... }]`（应该改成 `- id: qqbot-community, config: {...}` 替换形式）；(2) 旧 `file://` 形式的 row 没清掉。执行 `dsh --profile web --dump-config | grep "id: qqbot-community"` 应该只看到一行；多于一行就重复了。
+- **QQ 里只有基础对话、bash 等工具全无**：说明 QQ 会话没有挂上 agent preset —— DSH 会打印 `agent "qq:..." was published without joining an agent preset`。本插件默认会调 `agentPresets.mount('standard')`，但要求 host 上有 `dsh-agent-presets` row（web / cli profile 自带，自定义 profile 需手动加载）。要换 preset 时在 patch 里设置 `agentPreset: 'code'`（或自定义 id）；已有会话恢复时沿用 header 里记录的 preset，重启 `dsh` 或 `/new` 会用新值。

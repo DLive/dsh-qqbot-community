@@ -26,6 +26,15 @@ export interface Config {
   provider?: string
   model?: string
   cwd?: string
+  /**
+   * Agent preset id used when this plugin creates/resumes a session.
+   * Omit (or pass `undefined`) to fall back to `ctx.agentPresets.defaultId`.
+   * The preset supplies the agent's tools, prompt sections, and skill
+   * catalog; without it the agent runs on an empty global layer and only
+   * the per-session QQ tools (`qq_send_media`, `qq_api`) are visible.
+   * Persisted into the session header so resume restores the same preset.
+   */
+  agentPreset?: string
   debug?: boolean
   /** C2C sender openids allowed to use the bot; '*' wildcard; empty = allow all. */
   allowFrom?: string[]
@@ -263,6 +272,20 @@ export interface ApprovalRequestLike {
 
 export interface ApprovalServiceLike {
   setPolicy(agent: { id: string } & object, policy: 'ask' | 'never'): void
+}
+
+/**
+ * Structural view of `ctx.agentPresets` — the subset the QQ adapter needs.
+ * `mount()` joins an agent's scope to a preset's standing composition; a
+ * rejection here rolls the unpublished agent back via the factory's
+ * rollback-covered publication boundary, so a broken preset never yields a
+ * half-composed session.
+ */
+export interface AgentPresetsLike {
+  /** Mount the named preset (or the user-default when `id` is omitted). */
+  mount(agentCtx: Context, id?: string): Promise<{ readonly id: string }>
+  /** Resolve `undefined` to the configured default preset id. */
+  resolve(id?: string): Promise<{ readonly id: string }>
 }
 
 export interface ToolRegistryService {

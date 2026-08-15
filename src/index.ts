@@ -11,6 +11,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import {
+  type AgentPresetsLike,
   type AgentRegistryService,
   type ApprovalServiceLike,
   type AttachmentStoreService,
@@ -47,17 +48,22 @@ function resolveDshHome(): { home: string; storages: string } {
 function resolveOptionalServices(ctx: Context, log: ReturnType<typeof createLogSink>): {
   attachments: AttachmentStoreService | undefined
   approval: ApprovalServiceLike | undefined
+  agentPresets: AgentPresetsLike | undefined
 } {
   const get = ctx.get as (name: string, strict?: boolean) => unknown
   const attachments = get('attachments', false) as AttachmentStoreService | undefined
   const approval = get('approval', false) as ApprovalServiceLike | undefined
+  const agentPresets = get('agentPresets', false) as AgentPresetsLike | undefined
   if (attachments === undefined && log.debug !== undefined) {
     log.debug('attachments service not present; image attachments will fall back to text paths')
   }
   if (approval === undefined && log.debug !== undefined) {
     log.debug('approval service not present; inline-keyboard approval answerer disabled')
   }
-  return { attachments, approval }
+  if (agentPresets === undefined && log.debug !== undefined) {
+    log.debug('agentPresets service not present; QQ agents will run on the empty global layer')
+  }
+  return { attachments, approval, agentPresets }
 }
 
 /** Strict, narrow validator for QQ INTERACTION_CREATE payloads. */
@@ -85,7 +91,7 @@ export function apply(ctx: Context, config: Config): void {
   const agents = (ctx as unknown as { agents: AgentRegistryService }).agents
   const sessionPersistence = (ctx as unknown as { sessionPersistence?: SessionPersistenceService }).sessionPersistence
   const workspaceRegistry = (ctx as unknown as { workspaceRegistry?: WorkspaceRegistryService }).workspaceRegistry
-  const { attachments, approval } = resolveOptionalServices(ctx, log)
+  const { attachments, approval, agentPresets } = resolveOptionalServices(ctx, log)
 
   const api = new QQApi(config, log)
   const refIndex = new RefIndexStore(join(storages, 'qq-refindex.jsonl'))
@@ -110,6 +116,12 @@ export function apply(ctx: Context, config: Config): void {
 
   // Now that outbound exists, build the handlers that close over it.
   const onSlashCommand = createSlashHandler({ log, alwaysAllow, threads, agents, approval, outbound })
+  // `config.agentPreset` carries schemastery's `.default('standard')`, so it
+  // is always a non-empty string at runtime; we still defensively fall back
+  // to 'standard' for any empty override written by hand.
+  const presetOverride: string = (typeof config.agentPreset === 'string' && config.agentPreset.length > 0)
+    ? config.agentPreset
+    : 'standard'
   const setupAgent = createSetupAgent({
     log,
     api,
@@ -117,6 +129,13 @@ export function apply(ctx: Context, config: Config): void {
     outbound,
     workspaceRegistry,
     defaultCwd: config.cwd ?? process.cwd(),
+    // Resolve the configured preset id. When the host has no `agentPresets`
+    // service (older host, custom profile), leave the function undefined
+    // and `createSetupAgent` will log a warning at agent-creation time.
+    resolvePreset: agentPresets === undefined
+      ? undefined
+      : () => agentPresets.resolve(presetOverride),
+    agentPresets,
   })
   // The two callbacks above close over the same pipelines that depend on
   // them; attach them after construction so the cycle resolves cleanly.
