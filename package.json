@@ -1,6 +1,6 @@
 {
   "name": "dsh-qqbot-community",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "QQ Official Bot adapter for DeepSeek Harness (migrated from openclaw-qqbot)",
   "homepage": "https://github.com/DLive/dsh-qqbot-community#readme",
   "license": "MIT",
