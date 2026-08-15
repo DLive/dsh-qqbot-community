@@ -225,18 +225,38 @@ export class QQGateway {
 
   private identifyOrResume(token: string): void {
     if (this.socket?.readyState !== WebSocket.OPEN) return
+    const intents = this.config.intents ?? DEFAULT_INTENTS
     if (this.sessionId !== undefined && this.resumeAttempted) {
+      // RESUME path: the persisted session_id/seq belong to one specific
+      // AppID. Logging them (and the AppID) lets you spot "I switched AppIDs
+      // but my gateway session file still points at the old one".
+      this.log.info(
+        'QQ gateway: resume op=6 (appId=%s session_id=%s seq=%s intents=%s)',
+        this.config.id,
+        this.sessionId,
+        String(this.lastSequence),
+        intents,
+      )
       this.socket.send(JSON.stringify({
         op: 6,
         d: { token: `QQBot ${token}`, session_id: this.sessionId, seq: this.lastSequence },
       }))
       return
     }
+    // Fresh IDENTIFY path: print the intents mask we are about to subscribe
+    // to. A bot that never receives events but connects fine usually has the
+    // wrong mask here.
+    this.log.info(
+      'QQ gateway: identify op=2 (appId=%s intents=%s sandbox=%s)',
+      this.config.id,
+      intents,
+      String(this.config.sandbox ?? true),
+    )
     this.socket.send(JSON.stringify({
       op: 2,
       d: {
         token: `QQBot ${token}`,
-        intents: this.config.intents ?? DEFAULT_INTENTS,
+        intents,
         shard: [0, 1],
       },
     }))

@@ -107,6 +107,15 @@ export class QQApi {
 
   private async refreshToken(): Promise<string> {
     if (this.disposed) throw new Error('QQApi disposed')
+    // Print the AppID we're about to use so misconfiguration (typo'd id,
+    // wrong secret for the active id, sandbox-vs-prod mismatch) is obvious
+    // in the log without exposing the secret.
+    this.log.info(
+      'QQ token: requesting appAccessToken (appId=%s endpoint=%s sandbox=%s)',
+      this.config.id,
+      this.endpoint,
+      String(this.config.sandbox ?? true),
+    )
     const response = await fetch('https://bots.qq.com/app/getAppAccessToken', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -115,7 +124,19 @@ export class QQApi {
     })
     const data = asRecord(await response.json().catch(() => undefined))
     if (!response.ok || typeof data?.access_token !== 'string') {
-      throw new QQApiError(`token request failed: HTTP ${response.status}`, response.status, data)
+      // QQ returns `code`/`message` on failure (e.g. 400004 for appId mismatch);
+      // surface them so we can tell "wrong secret" from "unknown appId" from
+      // "app not approved".
+      const code = typeof data?.code === 'number' ? data.code : undefined
+      const message = typeof data?.message === 'string' ? data.message : undefined
+      throw new QQApiError(
+        `token request failed: HTTP ${response.status}`
+        + (code !== undefined ? ` code=${code}` : '')
+        + (message !== undefined ? ` message=${message}` : '')
+        + ` (appId=${this.config.id})`,
+        response.status,
+        data,
+      )
     }
     this.token = data.access_token
     const expiresIn = typeof data.expires_in === 'number' ? data.expires_in : 300
