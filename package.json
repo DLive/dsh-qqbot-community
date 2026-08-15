@@ -1,0 +1,27 @@
+{
+  "name": "dsh-qqbot-community",
+  "version": "1.0.0",
+  "description": "QQ Bot for DeepSeek Harness (migrated from openclaw-qqbot)",
+  "homepage": "https://github.com/DLive/dsh-qqbot-community",
+  "license": "MIT",
+  "author": "DLive",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "^3.18.1",
+    "ws": "^8.21.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.5.10",
+    "@deepseek-ai/cordis": "^4.0.1",
+    "typescript": "^5.4.0"
+  }
+}
