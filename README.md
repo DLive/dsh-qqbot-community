@@ -86,6 +86,16 @@ DSH 的层顺序是：每个 bundle 的 patch → profile 的 `cordis.patch.yml`
 
 编辑 `~/.dsh/profiles/web/cordis.patch.yml`，在已有内容末尾追加（**不要**覆盖文件里已有的其它 patch）：
 
+> ⚠️ **patch 必须是替换形式（`- id: ...`），不能是 insert 形式（`- insert: [...]`）。**
+>
+> 本 bundle 自身的 `cordis.patch.yml` 已经声明了 `id: qqbot-community` 的 row。用户层再写一个 `- insert: [{ id: qqbot-community, ... }]` 会让合并后的 entry 列表里出现两个同 id 的 row，DSH 会拒绝加载：
+>
+> ```
+> Error: duplicate loader entry id: qqbot-community
+> ```
+>
+> 正确写法是**按 id 替换 row 的 config**——DSH 的 patch 算法会用你写的 `config` 覆盖 bundle 提供的默认值；同一 id 的 row 在最终树里只剩一个。
+
 ```yaml
 - id: qqbot-community
   name: dsh-qqbot-community
@@ -95,7 +105,7 @@ DSH 的层顺序是：每个 bundle 的 patch → profile 的 `cordis.patch.yml`
     sandbox: true
     provider: 'DeepSeek' # 新建会话默认提供商
     model: 'DeepSeek-V4-Flash' # 新建会话默认模型
-    cwd: '/Users/xxxx/your-project'   # QQ 会话 agent 工作目录（须真实存在）
+    cwd: '/Users/xxxx/workdir'   # QQ 会话 agent 工作区目录（须真实存在）
     # 以下均可省略，以下为默认值
     allowFrom: ['*']           # C2C 白名单；填 openid 数组限定用户
     groupAllowFrom: ['*']      # 群白名单
@@ -150,3 +160,4 @@ dsh web
 - **回复没到**：查看被动限额日志 —— 超限自动转主动消息，QQ 对主动消息有频控。
 - **图片模型看不到**：确认 DSH 挂载 attachment 服务（web profile 默认有）；不支持格式自动回退为路径注入。
 - **审批按钮无响应**：确认开通按钮权限；`/approve status` 查看始终允许清单；超时默认 5 分钟自动拒绝。
+- **`Error: duplicate loader entry id: qqbot-community`**：合并后的 entry 树里出现了两个同 id 的 row。常见原因有两个：(1) 用户 `cordis.patch.yml` 里写了 `- insert: [{ id: qqbot-community, ... }]`（应该改成 `- id: qqbot-community, config: {...}` 替换形式）；(2) 旧 `file://` 形式的 row 没清掉。执行 `dsh --profile web --dump-config | grep "id: qqbot-community"` 应该只看到一行；多于一行就重复了。
