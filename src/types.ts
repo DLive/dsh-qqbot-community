@@ -6,6 +6,7 @@
  */
 import type { Context } from '@deepseek-ai/cordis'
 import type Schema from '@deepseek-ai/schemastery'
+import type { IncomingMessage as NodeHttpRequest, ServerResponse as NodeHttpResponse } from 'node:http'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Plugin configuration
@@ -15,6 +16,16 @@ export interface SttConfig {
   baseUrl: string
   apiKey: string
   model: string
+}
+
+/** HTTP push API mount config (`Config.httpApi`); off unless `enable` is set. */
+export interface HttpApiConfig {
+  /** Mount the push API on the host webServer service. */
+  enable?: boolean
+  /** Bearer token required by every request; mandatory when enabled (≥ 8 chars). */
+  token?: string
+  /** Route prefix (default `/external/qq`); absolute path, no trailing slash. */
+  path?: string
 }
 
 export interface Config {
@@ -66,6 +77,8 @@ export interface Config {
   approvalTimeoutMs?: number
   /** Intercept /help /ping /me /approve /always commands before the agent. */
   slashCommands?: boolean
+  /** Optional HTTP push API mounted on the host webServer (off by default). */
+  httpApi?: HttpApiConfig
 }
 
 export type ConfigSchema = Schema<Config>
@@ -201,6 +214,12 @@ export interface AgentLike {
   readonly id: string
   readonly ctx: Context
   send(message: UserMessageLike, target: 'next-turn' | 'next-step', wakeup: boolean): void
+  /**
+   * Queue model-facing context for the next pre-step without waking the
+   * driver. Used by the HTTP push API (`record: true`) so the agent learns
+   * about a pushed notification without generating a reply for it.
+   */
+  inject(message: UserMessageLike): void
   cancel(cause: { kind: 'user' } | { kind: 'parent' } | { kind: 'hook'; reason: string } | { kind: 'disposed' }): void
 }
 
@@ -327,4 +346,17 @@ export interface SessionEventShape {
 
 export interface SessionShape {
   readonly id: string
+}
+
+/**
+ * Structural view of the DSH host `webServer` service route registry.
+ * One prefix registration claims `<path>` and everything below it.
+ */
+export interface WebServerService {
+  /** Register a named route; the returned disposer removes it. */
+  register(route: {
+    readonly kind: 'exact' | 'prefix'
+    readonly path: string
+    handler(req: NodeHttpRequest, res: NodeHttpResponse): void | Promise<void>
+  }): () => void
 }

@@ -44,4 +44,9 @@ export const Config = Schema.object({
   approval: Schema.boolean().default(true).description('为 QQ 会话注册内联键盘审批 answerer'),
   approvalTimeoutMs: Schema.number().default(300000).description('审批按钮等待超时（毫秒）'),
   slashCommands: Schema.boolean().default(true).description('启用 /help /ping /me /new /presets /approve /always 命令'),
+  httpApi: Schema.object({
+    enable: Schema.boolean().default(false).description('在 dsh web 的 HTTP 服务上挂载外部推送 API（POST <path>/send、GET <path>/channels）'),
+    token: Schema.string().description('Bearer 认证 token；enable 时必填（至少 8 个字符），所有请求都须携带 Authorization: Bearer <token>'),
+    path: Schema.string().default('/external/qq').description('API 路由前缀（绝对路径，不以 / 结尾）；多个机器人实例需各自使用不同前缀'),
+  }).description('HTTP 推送 API（默认关闭；仅在宿主提供 webServer 服务时可用，如 dsh web）'),
 })

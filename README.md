@@ -42,6 +42,7 @@ npm install dsh-qqbot-community
 - **QQ API 代理工具**：`qq_api` 工具代理任意 QQ 开放平台 REST 调用（频道/群管理、公告、日程等），自动注入鉴权。
 - **斜杠命令**：`/help` `/ping` `/me` `/new [preset]` `/presets` `/approve ask|never|status` `/always clear`（在投递给 agent 之前拦截，映射 DSH 审批策略；完整列表见下节）。
 - **定时提醒**：复用 DSH schedule 子系统（web profile 自带 `schedule_create` 等工具）；提醒到期触发同会话 follow-up，回复经出站管线（含主动降级）送达 QQ。
+- **HTTP 推送 API（`httpApi`，默认关闭）**：在 dsh web 的 HTTP 端口上暴露认证端点，外部系统可把文本直接推送到指定 QQ 通道（不经模型）；`record: true` 可同时向会话注入一条不唤醒模型的记录，让 agent 知晓推送内容。详见下文「HTTP 推送 API」。
 
 ### 明确不迁移（平台强绑定或 DSH 已覆盖）
 Webhook transport、热升级（`/bot-upgrade`/update-checker）、`/bot-logs`/`/bot-version`/`/bot-clear-storage`（DSH Web UI 承担）、pairing 配对流、credential-backup、claw_cfg 私有协议、群自主模式（需 QQ 特批 `GROUP_MESSAGE_CREATE`）、群历史缓冲注入（DSH 会话日志已持久化完整上下文）。
@@ -161,6 +162,69 @@ dsh web
 ```
 
 启动后自动：获取 token → 建立 WS 网关（RESUME 恢复）→ 收到消息按会话创建/恢复 agent → 回复经出站管线送回 QQ。
+
+## HTTP 推送 API
+
+在 `cordis.patch.yml` 中启用 `httpApi` 后，本插件会在 dsh web 的 HTTP 服务上挂载两个 Bearer 认证端点，供外部系统（CI、监控、脚本）直接向 QQ 通道推送文本：
+
+```yaml
+- id: qqbot-community
+  name: ... # 同上
+  config:
+    ... # 同上
+    httpApi:
+      enable: true
+      token: '请生成一个足够长的随机串'   # 必填，≥ 8 字符，缺失时插件加载直接报错
+      # path: '/external/qq'           # 可选，默认 /external/qq；多机器人实例各用不同前缀
+```
+
+### `POST /external/qq/send`
+
+```jsonc
+{
+  "channel": "c2c:A2C71F...",       // 寻址方式一：简写 c2c:<openid> / group:<openid> / channel:<id>
+                                    // 也接受完整会话 id（qq:v2:c2c:XXX#n1，忽略线程后缀）
+  // "target": { "kind": "c2c", "userId": "A2C71F..." },  // 寻址方式二：对象形式
+  "text": "要推送的文本",             // 必填；超过 textChunkLimit 自动分段
+  "msgId": "ROBOT1.0_...",          // 可选：以该入站消息为被动回复锚点（省略则发主动消息）
+  "record": true                    // 可选：向该通道当前会话注入一条不唤醒模型的记录
+}
+```
+
+响应：
+
+```jsonc
+// 200
+{ "ok": true, "messageIds": ["..."], "chunks": 1, "recorded": false }
+// 401 未认证 / 400 参数错误 / 502 QQ 发送失败（附 messageIds 已成功部分）
+```
+
+要点：
+
+- **直接推送语义**：文本经与 agent 回复相同的 `QQApi.sendText` 路径送达，**不创建对话轮次、不触发模型**；`record: true` 时才向会话注入 `[HTTP 推送记录]` 上下文（`agent.inject`，不唤醒 driver），用户下次提问时模型可据此回答。目标是从未出现过的新通道时，`record` 会按插件配置为其创建新会话。
+- **主动消息频控**：不带 `msgId` 的推送是主动消息，受 QQ 平台主动消息额度限制（C2C 每月限额、群更严）。高频通知场景建议借用 `msgId`（如用户刚与机器人交互后的消息 id）走被动额度。
+- **认证是强制的**：dsh web 的请求防线（Host fence）不是认证层，本机任何进程都能访问该端口；`token` 必填且所有请求须携带 `Authorization: Bearer <token>`。若 webserver 绑定 `0.0.0.0`，这是唯一防线。
+
+### `GET /external/qq/channels`
+
+列出所有路由过的通道（供调用方发现 `channel` 寻址值）：
+
+```jsonc
+{ "ok": true, "channels": [
+  { "kind": "c2c", "id": "A2C71F...", "target": { "kind": "c2c", "userId": "A2C71F..." },
+    "currentSessionId": "qq:v2:c2c:A2C71F...#n5", "lastActiveAt": 1786792729138 }
+] }
+```
+
+### 验证
+
+```bash
+curl -X POST http://127.0.0.1:3080/external/qq/send \
+  -H 'Authorization: Bearer <token>' -H 'Content-Type: application/json' \
+  -d '{"channel":"c2c:A2C71F...","text":"hello from CI","record":true}'
+```
+
+开发时可运行 `node scripts/smoke-http-api.mjs`（stub QQApi 的本地端到端冒烟，16 项断言）。
 
 ## 注意事项
 

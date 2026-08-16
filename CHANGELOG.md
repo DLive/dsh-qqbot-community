@@ -2,6 +2,17 @@
 
 本文件格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)；版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.0.5] - 2026-08-17
+
+### 新增
+
+- **HTTP 推送 API（`httpApi` 配置组，默认关闭）**：在 dsh web 的 HTTP 服务（`webServer` 服务）上挂载外部推送端点，外部系统可将文本直接推送到指定 QQ 对话通道，不经模型处理。
+  - `POST <path>/send`：`channel` 简写（`c2c:<openid>` / `group:<openid>` / `channel:<id>` / 完整会话 id）或 `target` 对象寻址；文本按 `textChunkLimit` 自动分段；可选 `msgId`（以该消息为被动回复锚点）、`record: true`（同时向当前会话注入一条不唤醒模型的 `[HTTP 推送记录]` 上下文，agent 后续可据此回答用户询问）；
+  - `GET <path>/channels`：列出所有已知通道（kind、id、当前会话 id、最近活跃时间，按活跃度排序）；
+  - Bearer token 认证强制（`enable: true` 时 `token` 必填且 ≥ 8 字符，缺失/过短在加载时抛错）；QQ 发送失败返回 502 并附已成功的部分回执；
+  - 仅在宿主提供 `webServer` 服务时可用（如 `dsh web`）；多机器人实例通过不同的 `httpApi.path` 前缀隔离。
+- 新增 `scripts/smoke-http-api.mjs` 开发冒烟脚本（stub QQApi + 真实 node:http 服务器，覆盖认证/校验/分段/record/失败映射 16 项断言）。
+
 ## [1.0.4] - 2026-08-16
 
 ### 新增

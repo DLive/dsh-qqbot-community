@@ -492,8 +492,13 @@ export class InboundPipeline {
     }
   }
 
-  /** Create or resume the DSH agent bound to the QQ session id. */
-  private async ensureAgent(sessionId: string): Promise<AgentLike> {
+  /**
+   * Create or resume the DSH agent bound to the QQ session id. Also the entry
+   * point for the HTTP push API's `record: true` path, which needs the same
+   * setup (preset mount, workspace attach, approval answerer) as an inbound
+   * conversation.
+   */
+  async ensureAgent(sessionId: string): Promise<AgentLike> {
     const existing = this.deps.agents.get(sessionId)
     if (existing !== undefined) return existing
 
