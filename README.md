@@ -86,21 +86,6 @@ Webhook transport、热升级（`/bot-upgrade`/update-checker）、`/bot-logs`/`
 你：/new foo          ← 未知 id：报错并列出全部可用 id，thread 不推进，当前会话不受影响
 ```
 
-**校验规则**（问题："提供的 preset 是否可以判断在支持的列表里？"——可以）：
-
-- 校验对象是 host `agentPresets.list()` 的**实时名单**，包含部署自带（`standard` / `code` / `minimal` / `cordis`）和用户在 `${DSH_HOME:-~/.dsh}/.agent-presets/` 下自建的 preset；
-- **未知 id** → 回复 `⚠️ 未知的 preset "xxx"` 并附全部可用 id，**不推进 thread**（当前会话与锚点完全不受影响）；
-- **损坏 preset**（如 cordis.yml 解析失败）→ 回复 `⚠️ preset "xxx" 当前不可用` 并附发现原因（`broken` 字段）；
-- **host 未加载 agent-presets 服务**（自定义 profile 未加 `dsh-agent-presets` row）→ 明确提示当前环境不支持；
-- 即便校验通过后 preset 在下一条消息前被删除，宿主 `resolve()` 仍会以 `agent-preset-not-found`（附可用列表）拒绝创建，不会静默降级。
-
-**生效与持久化**：
-
-- 优先级：`/new <id>` 会话覆盖 → `agentPreset` 配置值 → host 默认（`standard`）；
-- 覆盖按**新 session id** 记录在 `~/.dsh/storages/qq-threads.json`（与 thread 计数同文件），重启、会话恢复（create/resume 两条路径）都解析同一覆盖，与 DSH "agentPreset 持久化进会话 header" 的语义一致；
-- 只影响 QQ 内新开的会话；已有会话、Web UI 会话不受影响；
-- 存量兼容：旧版纯计数器格式的 `qq-threads.json` 读取时自动迁移，下次写入升级为新格式，无需手工处理。
-
 ## 接入指南
 
 本包以 [DSH bundle](https://github.com/deepseek-harness/deepseek-harness/blob/main/docs/user/develop/basic/publish.md) 形式分发 —— `package.json` 声明 `dsh.bundle.patch`，仓库根的 `cordis.patch.yml` 是该 bundle 的默认配置层。用户通过 `dsh plugin add` 一行安装，DSH 自动把它加入 `~/.dsh/profiles/<name>/package.json` 的 `dsh.profile.bundles` 列表，并在下次启动时作为独立一层叠加。
