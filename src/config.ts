@@ -20,8 +20,9 @@ export const Config = Schema.object({
   model: Schema.string().default('DeepSeek-V4-Flash').description('新建 QQ 会话默认模型'),
   cwd: Schema.string().description('新建 QQ 会话的绝对工作目录'),
   agentPreset: Schema.string().default('standard').description(
-    'QQ 会话使用的 agent preset id（决定工具、提示词、技能）。'
-    + '缺省值 standard；可改为 code / minimal / cordis 或用户自定义 id。',
+    'QQ 会话使用的默认 agent preset id（决定工具、提示词、技能）。'
+    + '缺省值 standard；可改为 code / minimal / cordis 或用户自定义 id。'
+    + 'QQ 内可用 /new <id> 按会话覆盖（见 /presets）。',
   ),
   debug: Schema.boolean().default(false).description('调试日志'),
   allowFrom: Schema.array(Schema.string()).default(['*']).description("C2C 发送者 openid 白名单（'*' 通配，留空放行）"),
@@ -42,5 +43,5 @@ export const Config = Schema.object({
   }).description('语音转文字配置（未配置时使用 QQ 自带 ASR 或占位文本）'),
   approval: Schema.boolean().default(true).description('为 QQ 会话注册内联键盘审批 answerer'),
   approvalTimeoutMs: Schema.number().default(300000).description('审批按钮等待超时（毫秒）'),
-  slashCommands: Schema.boolean().default(true).description('启用 /help /ping /me /approve /always 命令'),
+  slashCommands: Schema.boolean().default(true).description('启用 /help /ping /me /new /presets /approve /always 命令'),
 })

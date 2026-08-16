@@ -115,7 +115,7 @@ export function apply(ctx: Context, config: Config): void {
   outbound.bind(ctx)
 
   // Now that outbound exists, build the handlers that close over it.
-  const onSlashCommand = createSlashHandler({ log, alwaysAllow, threads, agents, approval, outbound })
+  const onSlashCommand = createSlashHandler({ log, alwaysAllow, threads, agents, approval, outbound, agentPresets })
   // `config.agentPreset` carries schemastery's `.default('standard')`, so it
   // is always a non-empty string at runtime; we still defensively fall back
   // to 'standard' for any empty override written by hand.
@@ -129,12 +129,13 @@ export function apply(ctx: Context, config: Config): void {
     outbound,
     workspaceRegistry,
     defaultCwd: config.cwd ?? process.cwd(),
-    // Resolve the configured preset id. When the host has no `agentPresets`
-    // service (older host, custom profile), leave the function undefined
-    // and `createSetupAgent` will log a warning at agent-creation time.
+    // Resolve the preset per session: a `/new <preset>` override recorded for
+    // that session id wins over the plugin-config value. When the host has no
+    // `agentPresets` service (older host, custom profile), leave the function
+    // undefined and `createSetupAgent` will log a warning at agent-creation time.
     resolvePreset: agentPresets === undefined
       ? undefined
-      : () => agentPresets.resolve(presetOverride),
+      : (sessionId: string) => agentPresets.resolve(threads.presetFor(sessionId) ?? presetOverride),
     agentPresets,
   })
   // The two callbacks above close over the same pipelines that depend on

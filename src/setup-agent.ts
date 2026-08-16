@@ -33,13 +33,15 @@ export interface SetupDeps {
   /** Resolved absolute cwd for new sessions (configured `cwd` or `process.cwd()`). */
   readonly defaultCwd: string
   /**
-   * Preset selector used at agent creation time. Resolves to:
-   *   - the explicitly configured `agentPreset` (if non-empty),
+   * Preset selector used at agent creation time. Resolves, for one session,
+   * to:
+   *   - the `/new <preset>` override recorded for that session id (if any),
+   *   - otherwise the explicitly configured `agentPreset` (if non-empty),
    *   - otherwise `agentPresets.defaultId` (typically `standard`).
    * Pass `undefined` when the host has no `agentPresets` service; the setup
    * callback then logs a warning and runs without joining a preset.
    */
-  readonly resolvePreset: AgentPresetsLike['resolve'] | undefined
+  readonly resolvePreset: ((sessionId: string) => Promise<{ readonly id: string }>) | undefined
   /** Service handle for {@link AgentPresetsLike.mount}. */
   readonly agentPresets: AgentPresetsLike | undefined
 }
@@ -61,7 +63,7 @@ export function createSetupAgent(deps: SetupDeps): SetupHandler {
     if (agentPresets !== undefined && resolvePreset !== undefined) {
       let presetId: string | undefined
       try {
-        presetId = (await resolvePreset()).id
+        presetId = (await resolvePreset(sessionId)).id
       } catch (error: unknown) {
         log.error('QQ setupAgent: resolving agent preset failed for %s: %o', sessionId, error)
         throw error instanceof Error ? error : new Error(String(error))

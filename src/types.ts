@@ -275,6 +275,17 @@ export interface ApprovalServiceLike {
 }
 
 /**
+ * Structural view of a `ctx.agentPresets.list()` row — the subset the QQ
+ * adapter reads for `/new <preset>` validation and `/presets` display.
+ */
+export interface AgentPresetRowLike {
+  readonly id: string
+  readonly name?: string
+  /** Why this preset cannot compose a session, absent when it can. */
+  readonly broken?: string
+}
+
+/**
  * Structural view of `ctx.agentPresets` — the subset the QQ adapter needs.
  * `mount()` joins an agent's scope to a preset's standing composition; a
  * rejection here rolls the unpublished agent back via the factory's
@@ -286,6 +297,8 @@ export interface AgentPresetsLike {
   mount(agentCtx: Context, id?: string): Promise<{ readonly id: string }>
   /** Resolve `undefined` to the configured default preset id. */
   resolve(id?: string): Promise<{ readonly id: string }>
+  /** Every preset the configured roots currently supply (first-root-wins per id). */
+  list(): Promise<readonly AgentPresetRowLike[]>
 }
 
 export interface ToolRegistryService {

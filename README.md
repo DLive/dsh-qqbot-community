@@ -24,7 +24,7 @@ npm install dsh-qqbot-community
 ### 基础
 - **消息收发**：频道 `@机器人`、群聊 `@机器人` 和单聊消息。
 - **会话管理**：按频道、群或单聊用户创建或恢复独立的 Agent 会话（cwd 对齐持久化 header，工作区分组，归档自动恢复）。
-- **Agent preset 挂载**：每个 QQ 会话在 setup 阶段自动 `agentPresets.mount()` 加入预设（默认 `standard`，用 `agentPreset` 配置可换成 `code` / `minimal` / `cordis` 或任意用户自定义 id），恢复持久会话时沿用 header 中记录的 preset —— 因此 QQ 里的 agent 与 Web UI 拥有同一套工具（bash / 文件 / 代码运行等）和提示词，仅追加 `qq_send_media` / `qq_api` 等 QQ 专属工具。
+- **Agent preset 挂载**：每个 QQ 会话在 setup 阶段自动 `agentPresets.mount()` 加入预设（默认 `standard`，用 `agentPreset` 配置可换成 `code` / `minimal` / `cordis` 或任意用户自定义 id，QQ 里还可用 `/new <id>` 按会话即时切换 —— 见斜杠命令表），恢复持久会话时沿用 header 中记录的 preset —— 因此 QQ 里的 agent 与 Web UI 拥有同一套工具（bash / 文件 / 代码运行等）和提示词，仅追加 `qq_send_media` / `qq_api` 等 QQ 专属工具。
 - **沙箱支持**：开启后使用 QQ 官方沙箱 OpenAPI 接入点。
 - **网关可靠性**：WebSocket 心跳、断线重连退避、**会话 RESUME**（session_id + seq 持久化，重启不重放事件）。
 - **@mention 清洗**：`<@!openid>` → `@昵称`，机器人自身提及剔除（群/频道消息友好）。
@@ -40,7 +40,7 @@ npm install dsh-qqbot-community
 - **访问控制**：`allowFrom`（C2C openid）/ `groupAllowFrom`（群 openid）白名单，`'*'` 通配，留空放行。
 - **审批桥（inline keyboard）**：为每个 QQ 会话注册 agent 作用域 `approval/request` answerer —— 审批请求以三按钮消息送达 QQ（✅ 允许一次 / ⭐ 始终允许 / ❌ 拒绝），按钮回调即决策；"始终允许"按 会话×工具 持久化（`qq-always-allow.json`）。
 - **QQ API 代理工具**：`qq_api` 工具代理任意 QQ 开放平台 REST 调用（频道/群管理、公告、日程等），自动注入鉴权。
-- **斜杠命令**：`/help` `/ping` `/me` `/new` `/approve ask|never|status` `/always clear`（在投递给 agent 之前拦截，映射 DSH 审批策略；完整列表见下节）。
+- **斜杠命令**：`/help` `/ping` `/me` `/new [preset]` `/presets` `/approve ask|never|status` `/always clear`（在投递给 agent 之前拦截，映射 DSH 审批策略；完整列表见下节）。
 - **定时提醒**：复用 DSH schedule 子系统（web profile 自带 `schedule_create` 等工具）；提醒到期触发同会话 follow-up，回复经出站管线（含主动降级）送达 QQ。
 
 ### 明确不迁移（平台强绑定或 DSH 已覆盖）
@@ -55,13 +55,51 @@ Webhook transport、热升级（`/bot-upgrade`/update-checker）、`/bot-logs`/`
 | `/help` | — | 在 QQ 内列出全部可用斜杠命令。 |
 | `/ping` | — | 立即返回 `✅ pong（HH:MM:SS）`，用于延迟/可达性自检。 |
 | `/me` | — | 返回当前会话发送者的 `openid`（可选附带昵称），便于排查白名单。 |
-| `/new` | — | 强制关闭当前 thread 上的流式回复（`stream_messages` DONE 帧）并取消进行中的 agent，再为同一会话目标分配下一个 thread id（`#n1`、`#n2` …）；旧 session 保留，仍可在侧边栏切换。 |
+| `/new` | 可选 `preset id` | 强制关闭当前 thread 上的流式回复（`stream_messages` DONE 帧）并取消进行中的 agent，再为同一会话目标分配下一个 thread id（`#n1`、`#n2` …）；旧 session 保留，仍可在侧边栏切换。携带 preset id 时（如 `/new code`），新会话改用该 preset 组装（先对照 host 的 preset 列表校验，未知/损坏的 id 直接报错并列出可选项，不推进 thread）；不带参数则使用 `agentPreset` 配置值。覆盖按新 session id 持久化（`qq-threads.json`），重启后恢复同一会话仍用同一 preset。 |
+| `/presets` | — | 列出 host 当前提供的全部 agent preset（id、名称、损坏原因），供 `/new <id>` 选择。 |
 | `/approve` | `ask` \| `never` \| `status`（缺省 `status`） | `ask`/`never` 切换当前会话的审批策略（仅当 `approval: true` 且当前环境提供了 `approval` 服务时生效）；`status` 列出本会话已"始终允许"的工具名。 |
 | `/always` | `clear` | 清空本会话的"始终允许"清单；其它子命令视为未识别并回落到 agent。 |
 
 > 未识别的命令（例如 `/foo`）会被原样转发给 agent，不会被插件吞掉。
 
 实现位于 [`src/slash-commands.ts`](src/slash-commands.ts)，仅依赖注入式的 `SlashDeps`；测试 / 单元化时可直接传入 fake 依赖调用，无需启动 WebSocket。
+
+### 按会话切换 agent preset：`/new <preset>` 与 `/presets`
+
+`agentPreset` 配置是全局默认，调整它需要改 patch 并重启。这两个命令让你直接在 QQ 里为新会话即时指定 preset，无需任何配置变更。
+
+**典型对话**：
+
+```text
+你：/presets
+机器人：可用 agent preset：
+        - standard（标准）
+        - code（编码）
+        - cordis（Cordis 插件开发）
+        - my-agent（我的模式）
+        用 /new <id> 以指定 preset 开启新会话
+
+你：/new code
+机器人：✅ 已开启新会话（#n3，preset=code）。下次发送的消息将进入 `qq:v2:c2c:ABC123#n3`。旧的对话仍保留，可手动在侧边栏切换。
+
+你：/new              ← 不带参数：同样开新会话，但使用 agentPreset 配置的默认 preset
+你：/new foo          ← 未知 id：报错并列出全部可用 id，thread 不推进，当前会话不受影响
+```
+
+**校验规则**（问题："提供的 preset 是否可以判断在支持的列表里？"——可以）：
+
+- 校验对象是 host `agentPresets.list()` 的**实时名单**，包含部署自带（`standard` / `code` / `minimal` / `cordis`）和用户在 `${DSH_HOME:-~/.dsh}/.agent-presets/` 下自建的 preset；
+- **未知 id** → 回复 `⚠️ 未知的 preset "xxx"` 并附全部可用 id，**不推进 thread**（当前会话与锚点完全不受影响）；
+- **损坏 preset**（如 cordis.yml 解析失败）→ 回复 `⚠️ preset "xxx" 当前不可用` 并附发现原因（`broken` 字段）；
+- **host 未加载 agent-presets 服务**（自定义 profile 未加 `dsh-agent-presets` row）→ 明确提示当前环境不支持；
+- 即便校验通过后 preset 在下一条消息前被删除，宿主 `resolve()` 仍会以 `agent-preset-not-found`（附可用列表）拒绝创建，不会静默降级。
+
+**生效与持久化**：
+
+- 优先级：`/new <id>` 会话覆盖 → `agentPreset` 配置值 → host 默认（`standard`）；
+- 覆盖按**新 session id** 记录在 `~/.dsh/storages/qq-threads.json`（与 thread 计数同文件），重启、会话恢复（create/resume 两条路径）都解析同一覆盖，与 DSH "agentPreset 持久化进会话 header" 的语义一致；
+- 只影响 QQ 内新开的会话；已有会话、Web UI 会话不受影响；
+- 存量兼容：旧版纯计数器格式的 `qq-threads.json` 读取时自动迁移，下次写入升级为新格式，无需手工处理。
 
 ## 接入指南
 
@@ -87,16 +125,6 @@ DSH 的层顺序是：每个 bundle 的 patch → profile 的 `cordis.patch.yml`
 
 编辑 `~/.dsh/profiles/web/cordis.patch.yml`，在已有内容末尾追加（**不要**覆盖文件里已有的其它 patch）：
 
-> ⚠️ **patch 必须是替换形式（`- id: ...`），不能是 insert 形式（`- insert: [...]`）。**
->
-> 本 bundle 自身的 `cordis.patch.yml` 已经声明了 `id: qqbot-community` 的 row。用户层再写一个 `- insert: [{ id: qqbot-community, ... }]` 会让合并后的 entry 列表里出现两个同 id 的 row，DSH 会拒绝加载：
->
-> ```
-> Error: duplicate loader entry id: qqbot-community
-> ```
->
-> 正确写法是**按 id 替换 row 的 config**——DSH 的 patch 算法会用你写的 `config` 覆盖 bundle 提供的默认值；同一 id 的 row 在最终树里只剩一个。
-
 ```yaml
 - id: qqbot-community
   name: dsh-qqbot-community
@@ -106,7 +134,7 @@ DSH 的层顺序是：每个 bundle 的 patch → profile 的 `cordis.patch.yml`
     sandbox: true
     provider: 'DeepSeek' # 新建会话默认提供商
     model: 'DeepSeek-V4-Flash' # 新建会话默认模型
-    agentPreset: 'standard'    # preset id：standard / code / minimal / cordis / 自定义；缺省值 standard
+    agentPreset: 'standard'    # 新建会话默认 preset id：standard / code / minimal / cordis / 自定义；缺省值 standard。QQ 里可用 /new <id> 按会话覆盖（见斜杠命令表）
     cwd: '/Users/xxxx/workdir'   # QQ 会话 agent 工作区目录（须真实存在）
     # 以下均可省略，以下为默认值
     allowFrom: ['*']           # C2C 白名单；填 openid 数组限定用户
@@ -138,6 +166,8 @@ DSH 的层顺序是：每个 bundle 的 patch → profile 的 `cordis.patch.yml`
 > ```
 >
 > 这条路径绕开 `dsh plugin` 的依赖管理，仅适合本地开发。
+>
+> 🛠️ **开发模式**：clone → build → 以本地 `lib/index.js` 绝对路径挂载到 profile patch 的完整步骤与常见问题，见 [DEVELOPMENT.md](./DEVELOPMENT.md)。
 
 ### 3. 启动
 
@@ -154,7 +184,7 @@ dsh web
 - **审批链路**：QQ answerer 仅在会话审批策略为 `ask` 时收到请求（`never` 直接拒绝）；`/approve never` 关闭审批后所有 ask 确定性拒绝 —— 与 DSH 审批语义一致。
 - **流式与 markdown**：`stream_messages` 帧固定 `content_type: markdown`，与 `markdown` 配置独立（QQ 流式接口本身就是 markdown 渲染）。
 - **工作目录**：`cwd` 必须是已存在的绝对路径（`workspaceRegistry.create` 会 `fs.realpath` 校验）；已恢复会话保留原 cwd。
-- **运行时产物**：`~/.dsh/storages/qq-{routes,gateway-session,always-allow}.json`、`qq-refindex.jsonl`、`<cwd>/.qq-media/`；删除后自动重建。
+- **运行时产物**：`~/.dsh/storages/qq-{routes,gateway-session,always-allow,threads}.json`、`qq-refindex.jsonl`、`<cwd>/.qq-media/`；删除后自动重建（`qq-threads.json` 同时承载 thread 计数与 `/new <preset>` 的会话级覆盖，删除后所有目标回到 thread 0 与配置默认 preset）。
 
 ## 故障排查
 
@@ -163,4 +193,9 @@ dsh web
 - **图片模型看不到**：确认 DSH 挂载 attachment 服务（web profile 默认有）；不支持格式自动回退为路径注入。
 - **审批按钮无响应**：确认开通按钮权限；`/approve status` 查看始终允许清单；超时默认 5 分钟自动拒绝。
 - **`Error: duplicate loader entry id: qqbot-community`**：合并后的 entry 树里出现了两个同 id 的 row。常见原因有两个：(1) 用户 `cordis.patch.yml` 里写了 `- insert: [{ id: qqbot-community, ... }]`（应该改成 `- id: qqbot-community, config: {...}` 替换形式）；(2) 旧 `file://` 形式的 row 没清掉。执行 `dsh --profile web --dump-config | grep "id: qqbot-community"` 应该只看到一行；多于一行就重复了。
-- **QQ 里只有基础对话、bash 等工具全无**：说明 QQ 会话没有挂上 agent preset —— DSH 会打印 `agent "qq:..." was published without joining an agent preset`。本插件默认会调 `agentPresets.mount('standard')`，但要求 host 上有 `dsh-agent-presets` row（web / cli profile 自带，自定义 profile 需手动加载）。要换 preset 时在 patch 里设置 `agentPreset: 'code'`（或自定义 id）；已有会话恢复时沿用 header 里记录的 preset，重启 `dsh` 或 `/new` 会用新值。
+- **QQ 里只有基础对话、bash 等工具全无**：说明 QQ 会话没有挂上 agent preset —— DSH 会打印 `agent "qq:..." was published without joining an agent preset`。本插件默认会调 `agentPresets.mount('standard')`，但要求 host 上有 `dsh-agent-presets` row（web / cli profile 自带，自定义 profile 需手动加载）。要换 preset 时在 patch 里设置 `agentPreset: 'code'`（或自定义 id），或在 QQ 里 `/new code` 即时开一个用该 preset 的新会话（`/presets` 可列出全部可选项）；已有会话恢复时沿用 header 里记录的 preset，重启 `dsh` 或 `/new` 会用新值。
+- **`/new <id>` 报"未知的 preset"**：id 必须精确匹配 `/presets` 列出的 id（大小写敏感）。自定义 preset 放在 `${DSH_HOME:-~/.dsh}/.agent-presets/<id>/cordis.yml`，新建后无需重启即可被 `/presets` 发现（名单每次实时读取）。
+
+## 更新日志
+
+见 [CHANGELOG.md](./CHANGELOG.md)。
