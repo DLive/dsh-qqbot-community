@@ -8,12 +8,13 @@
 
 - **C2C 流式帧严格串行**：此前 `onStreamDelta` 以 fire-and-forget 发送替换帧，且节流时间戳 `lastSentAt` 在请求完成后才更新，导致一帧在途期间到达的每个 delta 都并发再发一帧；QQ 服务端拒绝并发替换帧（`40034021 其它流式消息发送中`、`40054005 消息被去重`），插件随即把流标记失败并整轮降级静态发送。现在帧经单一 drain 循环串行发送，最新 delta 覆盖 pending，最后一帧始终携带最新文本。
 - **DONE 帧等待在途帧并重试**：turn 结束 / 关闭流时先等待在途帧结束后再发 DONE（`input_state=10`）帧，发送失败按 400ms/800ms 退避重试 3 次，避免丢失 DONE 使 QQ 侧流保持"发送中"、下一条流被以 `40034021` 拒绝。
+- **关闭时立即停止 drain 循环**：新增 `closing` 标志，`finishStream` 第一时间置位并清空 pending——若流在节流等待中结束（如最终文本与已流式前缀不一致走"分歧"分支），睡眠中的 drain 醒来后不再补发残留帧；否则该帧会打向已被静态消息消费的锚点，QQ 返回 `40007 已经提交的消息内容不可修改`。
 - **`msg_seq` 改为进程内单调递增**：原 `Date.now() ^ random` 生成器可能为两个并发流产生相同 seq（触发 `40054005` 去重拒绝）；现使用共享计数器在 0..65535 范围内循环。
 - **`onAssistantMessage` 前缀判断参数顺序修正**：`prefixMatches(text, stream.lastAccepted)` 实参顺序与函数语义（incoming 以 accepted 开头）相反，导致正常结束的流误走"分歧"分支、DONE 帧不携带最终文本；修正为 `prefixMatches(stream.lastAccepted, text)`。
 
 ### 验证
 
-- 新增 `scripts/verify-stream-fix.mjs`：场景一模拟 30 个快速 delta 与慢 QQ API（断言帧严格串行、index 连续、GENERATING/DONE 状态齐全、DONE 携带全文）；场景二模拟 API 拒绝（断言失败后不再重试流式、静态兜底消息发出）。运行：`node scripts/verify-stream-fix.mjs`。
+- 新增 `scripts/verify-stream-fix.mjs`：场景一模拟 30 个快速 delta 与慢 QQ API（断言帧严格串行、index 连续、GENERATING/DONE 状态齐全、DONE 携带全文）；场景二模拟 API 拒绝（断言失败后不再重试流式、静态兜底消息发出）；场景三模拟流在节流等待中分歧结束（断言 drain 不再补发残留帧、DONE 与静态兜底正常）。运行：`node scripts/verify-stream-fix.mjs`。
 
 ## [1.0.4] - 2026-08-16
 

@@ -3,7 +3,7 @@ import { OutboundPipeline } from '../lib/outbound.js'
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
-function makePipeline(apiImpl) {
+function makePipeline(apiImpl, configOverrides = {}) {
   const calls = []
   let inflight = 0
   let maxInflight = 0
@@ -34,6 +34,7 @@ function makePipeline(apiImpl) {
     deliverMaxWaitMs: 6000,
     replyPassiveLimit: 4,
     markdown: false,
+    ...configOverrides,
   }
   const routes = {
     get() { return { target: { kind: 'c2c', userId: 'u1' }, lastMsgId: 'm1' } },
@@ -105,6 +106,38 @@ function makePipeline(apiImpl) {
   console.log('[scenario 2] streamCalls=%d failures=%d staticSends=%d maxConcurrent=%d',
     calls.length, failures, staticSends, maxInflight)
   console.log('[scenario 2]', pass ? 'PASS' : 'FAIL')
+  if (!pass) process.exit(1)
+}
+
+// Scenario 3: stream diverges while the drain loop sleeps on the throttle —
+// finishing must set `closing` so the drain never sends another GENERATING
+// frame against an anchor the static delivery already consumed (QQ 40007).
+{
+  const suite = makePipeline(async (_userId, _frame) => {
+    await sleep(80)
+    return 'stream-msg-id-1'
+  }, { streamThrottleMs: 1200 })
+  const { pipeline, calls } = suite
+  const sid = 'qq:v2:c2c:u1#n3'
+  pipeline.onStreamDelta(sid, 'Hello ')
+  await sleep(150) // first frame settles
+  pipeline.onStreamDelta(sid, 'Hello world from ')
+  pipeline.onStreamDelta(sid, 'Hello world from the bot')
+  await sleep(150)
+  // Diverged: final text does not continue the streamed prefix.
+  await pipeline.onAssistantMessage(sid, 'Goodbye world')
+  await sleep(2500) // longer than the throttle sleep
+
+  const generating = calls.filter((c) => c.frame.state === 1)
+  const done = calls.filter((c) => c.frame.state === 10)
+  const { maxInflight, staticSends } = suite
+  const pass = generating.length === 1
+    && done.length === 1
+    && maxInflight === 1
+    && staticSends >= 1
+  console.log('[scenario 3] generatingFrames=%d doneFrames=%d staticSends=%d maxConcurrent=%d',
+    generating.length, done.length, staticSends, maxInflight)
+  console.log('[scenario 3]', pass ? 'PASS' : 'FAIL')
   if (!pass) process.exit(1)
 }
 

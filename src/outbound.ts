@@ -75,6 +75,8 @@ interface StreamState {
   pending?: string
   /** True while a frame request is in flight (QQ accepts one replace frame at a time). */
   inFlight: boolean
+  /** True once the stream is being closed: the drain loop must stop and never send another frame. */
+  closing: boolean
   streamMsgId?: string
   sentFrames: number
   failed: boolean
@@ -209,13 +211,14 @@ export class OutboundPipeline {
         lastAccepted: '',
         pending: undefined,
         inFlight: false,
+        closing: false,
         sentFrames: 0,
         failed: false,
         lastSentAt: 0,
       }
       this.streams.set(sessionId, stream)
     }
-    if (stream.failed) return
+    if (stream.failed || stream.closing) return
     stream.pending = prefixMatches(stream.lastAccepted, delta)
       ? delta
       : stream.lastAccepted + delta.slice(longestCommonPrefix(stream.lastAccepted, delta))
@@ -230,10 +233,10 @@ export class OutboundPipeline {
    * while a frame was in flight passed the throttle and raced it.
    */
   private async drainStream(sessionId: string, stream: StreamState): Promise<void> {
-    if (stream.inFlight || stream.failed) return
+    if (stream.inFlight || stream.failed || stream.closing) return
     stream.inFlight = true
     try {
-      while (!stream.failed && stream.pending !== undefined) {
+      while (!stream.failed && !stream.closing && stream.pending !== undefined) {
         const throttle = this.deps.config.streamThrottleMs ?? 1_200
         const wait = throttle - (Date.now() - stream.lastSentAt)
         if (wait > 0) {
@@ -247,7 +250,7 @@ export class OutboundPipeline {
     } finally {
       stream.inFlight = false
       // A delta may have landed after the loop drained its last frame.
-      if (!stream.failed && stream.pending !== undefined) void this.drainStream(sessionId, stream)
+      if (!stream.failed && !stream.closing && stream.pending !== undefined) void this.drainStream(sessionId, stream)
     }
   }
 
@@ -302,13 +305,18 @@ export class OutboundPipeline {
    * Wait for any in-flight frame, drop unsent candidates, then close the
    * stream with a DONE frame. Used at turn end and on external close so the
    * DONE frame never races a still-flying GENERATING frame of the same
-   * stream (QQ treats that as a second concurrent stream, 40034021).
+   * stream (QQ treats that as a second concurrent stream, 40034021). The
+   * `closing` flag is set FIRST: a drain loop sleeping on the throttle must
+   * stop when it wakes, otherwise it would send one more frame against an
+   * anchor the static delivery already consumed (QQ then answers
+   * 40007 "已经提交的消息内容不可修改").
    */
   private async finishStream(sessionId: string, stream: StreamState, text: string): Promise<void> {
+    stream.closing = true
+    stream.pending = undefined
     while (stream.inFlight) {
       await new Promise(resolve => setTimeout(resolve, 50))
     }
-    stream.pending = undefined
     await this.sendDoneFrame(sessionId, stream, text)
   }
 
