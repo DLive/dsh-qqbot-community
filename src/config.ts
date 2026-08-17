@@ -43,6 +43,13 @@ export const Config = Schema.object({
   }).description('语音转文字配置（未配置时使用 QQ 自带 ASR 或占位文本）'),
   approval: Schema.boolean().default(true).description('为 QQ 会话注册内联键盘审批 answerer'),
   approvalTimeoutMs: Schema.number().default(300000).description('审批按钮等待超时（毫秒）'),
+  questions: Schema.boolean().default(true).description(
+    '把 agent 的 ask_user_question 弹窗转发到 QQ（默认以编号文字回答），避免 QQ 侧无响应',
+  ),
+  questionTimeoutMs: Schema.number().default(300000).description('转发问题等待 QQ 回答的超时（毫秒）'),
+  questionButtons: Schema.boolean().default(false).description(
+    '转发问题时为 单问题+单选+选项≤5 渲染 QQ 内联键盘按钮（需开通消息按钮权限；沙箱环境可能不显示，默认关闭，用编号文字回答）',
+  ),
   slashCommands: Schema.boolean().default(true).description('启用 /help /ping /me /new /presets /approve /always 命令'),
   httpApi: Schema.object({
     enable: Schema.boolean().default(false).description('在 dsh web 的 HTTP 服务上挂载外部推送 API（POST <path>/send、GET <path>/channels）'),

@@ -39,6 +39,7 @@ npm install dsh-qqbot-community
 - **typing 指示**：C2C 处理期间 60s 输入中状态自动续发（50s 间隔）。
 - **访问控制**：`allowFrom`（C2C openid）/ `groupAllowFrom`（群 openid）白名单，`'*'` 通配，留空放行。
 - **审批桥（inline keyboard）**：为每个 QQ 会话注册 agent 作用域 `approval/request` answerer —— 审批请求以三按钮消息送达 QQ（✅ 允许一次 / ⭐ 始终允许 / ❌ 拒绝），按钮回调即决策；"始终允许"按 会话×工具 持久化（`qq-always-allow.json`）。
+- **ask_user_question 转发（`questions`，默认开启）**：agent 调用 `ask_user_question` 时，问题转发到 QQ 对话（否则只出现在 Web UI，QQ 侧会一直"无响应"）。默认以纯文本呈现编号选项，直接回复编号（如 `1,3`）、选项文字或自由文本（多问题按行回答）；`questionButtons: true` 可为 单问题+单选+选项≤5 附加内联键盘按钮（需开通消息按钮权限，沙箱可能不显示，发送失败自动回退纯文本）；无效回答有引导提示且不进入 agent；超时（`questionTimeoutMs`，默认 300s）/turn 取消/会话结束自动收尾。经 agent 作用域 `tools/execute` 拦截实现，不影响 Web UI 的其它会话；`questions: false` 关闭。
 - **QQ API 代理工具**：`qq_api` 工具代理任意 QQ 开放平台 REST 调用（频道/群管理、公告、日程等），自动注入鉴权。
 - **斜杠命令**：`/help` `/ping` `/me` `/new [preset]` `/presets` `/approve ask|never|status` `/always clear`（在投递给 agent 之前拦截，映射 DSH 审批策略；完整列表见下节）。
 - **定时提醒**：复用 DSH schedule 子系统（web profile 自带 `schedule_create` 等工具）；提醒到期触发同会话 follow-up，回复经出站管线（含主动降级）送达 QQ。

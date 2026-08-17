@@ -75,6 +75,12 @@ export interface Config {
   approval?: boolean
   /** How long to wait for an approval button press. */
   approvalTimeoutMs?: number
+  /** Forward `ask_user_question` tool calls to QQ (buttons + text answers). */
+  questions?: boolean
+  /** How long to wait for a QQ answer to a forwarded question. */
+  questionTimeoutMs?: number
+  /** Render single-choice questions as QQ inline-keyboard buttons (opt-in). */
+  questionButtons?: boolean
   /** Intercept /help /ping /me /approve /always commands before the agent. */
   slashCommands?: boolean
   /** Optional HTTP push API mounted on the host webServer (off by default). */

@@ -22,6 +22,7 @@ import type {
 import { targetOfSession } from './inbound.js'
 import type { OutboundPipeline } from './outbound.js'
 import { registerQQTools } from './tools.js'
+import { type QuestionBridge, registerAskUserInterceptor } from './questions.js'
 import { attachSessionToCwdWorkspace } from './dsh-bookkeeping.js'
 
 export interface SetupDeps {
@@ -44,6 +45,8 @@ export interface SetupDeps {
   readonly resolvePreset: ((sessionId: string) => Promise<{ readonly id: string }>) | undefined
   /** Service handle for {@link AgentPresetsLike.mount}. */
   readonly agentPresets: AgentPresetsLike | undefined
+  /** QQ-side user-questions bridge; `undefined` disables the forwarding. */
+  readonly questions: QuestionBridge | undefined
 }
 
 /** Built handler compatible with `InboundPipeline.InboundDeps.setupAgent`. */
@@ -53,7 +56,7 @@ export type SetupHandler = (
 ) => void | Promise<void>
 
 export function createSetupAgent(deps: SetupDeps): SetupHandler {
-  const { log, api, routes, outbound, workspaceRegistry, defaultCwd, resolvePreset, agentPresets } = deps
+  const { log, api, routes, outbound, workspaceRegistry, defaultCwd, resolvePreset, agentPresets, questions } = deps
   return async (agentCtx, sessionId) => {
     // 1. Join the agent's preset FIRST so its tools, prompt sections, and
     //    skill catalog are in scope before any QQ-only tool registers.
@@ -88,6 +91,7 @@ export function createSetupAgent(deps: SetupDeps): SetupHandler {
       routes.get(sessionId)?.target ?? targetOfSession(sessionId)
     registerQQTools(agentCtx, sessionId, api, target)
     outbound.registerApprovalAnswerer(agentCtx, sessionId)
+    if (questions !== undefined) registerAskUserInterceptor(agentCtx, sessionId, questions)
     routes.ensure(sessionId, target())
     void attachSessionToCwdWorkspace(workspaceRegistry, defaultCwd, sessionId, log)
   }

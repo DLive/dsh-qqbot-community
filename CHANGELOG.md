@@ -2,6 +2,18 @@
 
 本文件格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)；版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [未发布]
+
+### 新增
+
+- **`ask_user_question` 弹窗转发到 QQ（`questions` 配置，默认开启）**：QQ 会话中 agent 调用 `ask_user_question` 时，问题不再只落在 Web UI（此前 QQ 侧表现为"无响应"），而是渲染到 QQ 对话并可直接在 QQ 上回答：
+  - 默认以**纯文本**呈现（编号选项），回复编号（如 `1`）、选项文字或自由文本即作答（多问题按行回答）；
+  - `questionButtons: true` 可为 单问题+单选+选项≤5 附加 QQ 内联键盘按钮（需开通消息按钮权限，沙箱环境可能不显示，键盘发送失败自动回退纯文本）；
+  - 无效回答会收到引导提示且不进入 agent，问题继续等待；超时（`questionTimeoutMs`，默认 300s）、turn 取消、会话结束都会自动收尾；
+  - 问题呈现前自动冲刷出站合并缓冲，模型的引导语先于问题送达，顺序自然；
+  - 答案解析支持编号（`1`、`1,3`）、字母前缀（`A`/`a`/`A.` 匹配 `A. xxx` 式选项）、完整选项文字与自由文本；
+  - 通过作用域限定的 `tools/execute` 拦截实现，不影响 Web UI 的其它会话；`questions: false` 可关闭回退到原行为。
+
 ## [1.0.5] - 2026-08-17
 
 ### 新增

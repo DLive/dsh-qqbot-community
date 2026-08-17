@@ -309,6 +309,17 @@ export class OutboundPipeline {
     if (!final) return
   }
 
+  /**
+   * Immediately deliver any debounce-buffered assistant text for one session.
+   * Called before a forwarded question is presented on QQ so the model's
+   * preamble ("好的，我向你提问:") lands BEFORE the question, not after it.
+   */
+  async flushText(sessionId: string): Promise<void> {
+    await this.flushBuffer(sessionId, false).catch((error: unknown) => {
+      this.deps.log.warn('QQ flushText failed for %s: %o', sessionId, error)
+    })
+  }
+
   /** Send static text chunks with passive-anchor accounting. */
   private async sendStatic(sessionId: string, text: string): Promise<void> {
     const target = this.targetOf(sessionId)

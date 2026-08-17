@@ -47,6 +47,11 @@ export interface InboundDeps {
   readonly attachments: AttachmentStoreService | undefined
   readonly approval: { setPolicy(agent: { id: string } & object, policy: 'ask' | 'never'): void } | undefined
   readonly threads: ThreadStore
+  /** QQ-side user-questions bridge (structural; see ./questions.js). */
+  readonly questions: {
+    consumeTextReply(sessionId: string, text: string): Promise<boolean>
+    dispose(sessionId: string): void
+  } | undefined
 }
 
 /** Hooks attached after construction via {@link InboundPipeline.attachHooks}. */
@@ -362,6 +367,18 @@ export class InboundPipeline {
       if (handled) return
     }
 
+    // A pending ask_user_question waits for this session's next text: consume
+    // it as the answer (or send guidance for an invalid attempt) instead of
+    // forwarding it into the agent inbox, where the blocked tool could not
+    // see it.
+    if (this.deps.questions !== undefined && cleaned.length > 0) {
+      try {
+        if (await this.deps.questions.consumeTextReply(sessionId, cleaned)) return
+      } catch (error) {
+        this.deps.log.warn('question text consumption failed: %o', error)
+      }
+    }
+
     // Routing bookkeeping before anything async: the outbound pipeline and
     // any non-slash replies both depend on the anchor being present.
     this.deps.routes.anchor(sessionId, message.reply, message.id)
@@ -557,6 +574,7 @@ export class InboundPipeline {
   onAgentDisposed(sessionId: string): void {
     this.agentCreation.delete(sessionId)
     this.stopTyping(sessionId)
+    this.deps.questions?.dispose(sessionId)
   }
 
   /** Clear every typing timer; used during plugin teardown. */

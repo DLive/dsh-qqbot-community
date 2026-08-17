@@ -29,6 +29,7 @@ import { createLogSink } from './log.js'
 import { unarchiveOwnQQSessions } from './dsh-bookkeeping.js'
 import { createSlashHandler } from './slash-commands.js'
 import { createSetupAgent } from './setup-agent.js'
+import { QuestionBridge } from './questions.js'
 import { ThreadStore } from './threadstore.js'
 import { createHttpApiHandler, resolveHttpApiMount } from './http-api.js'
 import { Config, type Config as ConfigType } from './config.js'
@@ -102,6 +103,10 @@ export function apply(ctx: Context, config: Config): void {
   const routes = new RouteStore(join(storages, 'qq-routes.json'))
   const alwaysAllow = new AlwaysAllowStore(join(storages, 'qq-always-allow.json'))
   const threads = new ThreadStore(join(storages, 'qq-threads.json'))
+  // QQ-side ask_user_question forwarding: renders the agent's questions on QQ
+  // (buttons/numbered text) and settles them from the chat. Disabled by
+  // config.questions=false, in which case the host UI provider keeps them.
+  const questions = config.questions === false ? undefined : new QuestionBridge({ config, api, log, routes })
 
   const inbound = new InboundPipeline({
     config,
@@ -114,9 +119,13 @@ export function apply(ctx: Context, config: Config): void {
     attachments,
     approval,
     threads,
+    questions,
   })
   const outbound = new OutboundPipeline({ config, api, log, routes, alwaysAllow, inbound })
   outbound.bind(ctx)
+  // Flush the debounce buffer before presenting a question so the model's
+  // preamble precedes the question in the chat.
+  questions?.attachHooks({ onPresent: (sessionId: string) => outbound.flushText(sessionId) })
 
   // Now that outbound exists, build the handlers that close over it.
   const onSlashCommand = createSlashHandler({ log, alwaysAllow, threads, agents, approval, outbound, agentPresets })
@@ -141,6 +150,7 @@ export function apply(ctx: Context, config: Config): void {
       ? undefined
       : (sessionId: string) => agentPresets.resolve(threads.presetFor(sessionId) ?? presetOverride),
     agentPresets,
+    questions,
   })
   // The two callbacks above close over the same pipelines that depend on
   // them; attach them after construction so the cycle resolves cleanly.
@@ -162,6 +172,12 @@ export function apply(ctx: Context, config: Config): void {
         const interaction = asInteractionButton(payload)
         if (interaction === undefined) return
         if (outbound.handleApprovalCallback(interaction.buttonData) !== undefined) {
+          void api.ackInteraction(interaction.id).catch((error: unknown) => {
+            logger.warn('interaction ack failed: %o', error)
+          })
+          return
+        }
+        if (questions?.handleInteraction(interaction.buttonData) === true) {
           void api.ackInteraction(interaction.id).catch((error: unknown) => {
             logger.warn('interaction ack failed: %o', error)
           })
@@ -235,6 +251,7 @@ export function apply(ctx: Context, config: Config): void {
       if (typeof stopDisposed === 'function') stopDisposed()
       void outbound.disposeAllStreams()
       inbound.dispose()
+      questions?.disposeAll()
       gateway.dispose()
       api.dispose()
       void outbound.dispose()
