@@ -2,7 +2,9 @@
 
 本文件格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)；版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+
+## [未发布]
+
 
 ### 修复
 
@@ -15,6 +17,28 @@
 ### 验证
 
 - 新增 `scripts/verify-stream-fix.mjs`：场景一模拟 30 个快速 delta 与慢 QQ API（断言帧严格串行、index 连续、GENERATING/DONE 状态齐全、DONE 携带全文）；场景二模拟 API 拒绝（断言失败后不再重试流式、静态兜底消息发出）；场景三模拟流在节流等待中分歧结束（断言 drain 不再补发残留帧、DONE 与静态兜底正常）。运行：`node scripts/verify-stream-fix.mjs`。
+
+### 新增
+
+- **`ask_user_question` 弹窗转发到 QQ（`questions` 配置，默认开启）**：QQ 会话中 agent 调用 `ask_user_question` 时，问题不再只落在 Web UI（此前 QQ 侧表现为"无响应"），而是渲染到 QQ 对话并可直接在 QQ 上回答：
+  - 默认以**纯文本**呈现（编号选项），回复编号（如 `1`）、选项文字或自由文本即作答（多问题按行回答）；
+  - `questionButtons: true` 可为 单问题+单选+选项≤5 附加 QQ 内联键盘按钮（需开通消息按钮权限，沙箱环境可能不显示，键盘发送失败自动回退纯文本）；
+  - 无效回答会收到引导提示且不进入 agent，问题继续等待；超时（`questionTimeoutMs`，默认 300s）、turn 取消、会话结束都会自动收尾；
+  - 问题呈现前自动冲刷出站合并缓冲，模型的引导语先于问题送达，顺序自然；
+  - 答案解析支持编号（`1`、`1,3`）、字母前缀（`A`/`a`/`A.` 匹配 `A. xxx` 式选项）、完整选项文字与自由文本；
+  - 通过作用域限定的 `tools/execute` 拦截实现，不影响 Web UI 的其它会话；`questions: false` 可关闭回退到原行为。
+
+## [1.0.5] - 2026-08-17
+
+### 新增
+
+- **HTTP 推送 API（`httpApi` 配置组，默认关闭）**：在 dsh web 的 HTTP 服务（`webServer` 服务）上挂载外部推送端点，外部系统可将文本直接推送到指定 QQ 对话通道，不经模型处理。
+  - `POST <path>/send`：`channel` 简写（`c2c:<openid>` / `group:<openid>` / `channel:<id>` / 完整会话 id）或 `target` 对象寻址；文本按 `textChunkLimit` 自动分段；可选 `msgId`（以该消息为被动回复锚点）、`record: true`（同时向当前会话注入一条不唤醒模型的 `[HTTP 推送记录]` 上下文，agent 后续可据此回答用户询问）；
+  - `GET <path>/channels`：列出所有已知通道（kind、id、当前会话 id、最近活跃时间，按活跃度排序）；
+  - Bearer token 认证强制（`enable: true` 时 `token` 必填且 ≥ 8 字符，缺失/过短在加载时抛错）；QQ 发送失败返回 502 并附已成功的部分回执；
+  - 仅在宿主提供 `webServer` 服务时可用（如 `dsh web`）；多机器人实例通过不同的 `httpApi.path` 前缀隔离。
+- 新增 `scripts/smoke-http-api.mjs` 开发冒烟脚本（stub QQApi + 真实 node:http 服务器，覆盖认证/校验/分段/record/失败映射 16 项断言）。
+
 
 ## [1.0.4] - 2026-08-16
 

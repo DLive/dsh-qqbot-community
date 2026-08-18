@@ -16,6 +16,7 @@ import {
   type ApprovalServiceLike,
   type AttachmentStoreService,
   type SessionPersistenceService,
+  type WebServerService,
   type WorkspaceRegistryService,
 } from './types.js'
 import { QQApi } from './qqapi.js'
@@ -28,7 +29,9 @@ import { createLogSink } from './log.js'
 import { unarchiveOwnQQSessions } from './dsh-bookkeeping.js'
 import { createSlashHandler } from './slash-commands.js'
 import { createSetupAgent } from './setup-agent.js'
+import { QuestionBridge } from './questions.js'
 import { ThreadStore } from './threadstore.js'
+import { createHttpApiHandler, resolveHttpApiMount } from './http-api.js'
 import { Config, type Config as ConfigType } from './config.js'
 
 // Re-export the schema so DSH can mount this plugin via `name: 'qqbot-community'`.
@@ -49,11 +52,13 @@ function resolveOptionalServices(ctx: Context, log: ReturnType<typeof createLogS
   attachments: AttachmentStoreService | undefined
   approval: ApprovalServiceLike | undefined
   agentPresets: AgentPresetsLike | undefined
+  webServer: WebServerService | undefined
 } {
   const get = ctx.get as (name: string, strict?: boolean) => unknown
   const attachments = get('attachments', false) as AttachmentStoreService | undefined
   const approval = get('approval', false) as ApprovalServiceLike | undefined
   const agentPresets = get('agentPresets', false) as AgentPresetsLike | undefined
+  const webServer = get('webServer', false) as WebServerService | undefined
   if (attachments === undefined && log.debug !== undefined) {
     log.debug('attachments service not present; image attachments will fall back to text paths')
   }
@@ -63,7 +68,7 @@ function resolveOptionalServices(ctx: Context, log: ReturnType<typeof createLogS
   if (agentPresets === undefined && log.debug !== undefined) {
     log.debug('agentPresets service not present; QQ agents will run on the empty global layer')
   }
-  return { attachments, approval, agentPresets }
+  return { attachments, approval, agentPresets, webServer }
 }
 
 /** Strict, narrow validator for QQ INTERACTION_CREATE payloads. */
@@ -91,13 +96,17 @@ export function apply(ctx: Context, config: Config): void {
   const agents = (ctx as unknown as { agents: AgentRegistryService }).agents
   const sessionPersistence = (ctx as unknown as { sessionPersistence?: SessionPersistenceService }).sessionPersistence
   const workspaceRegistry = (ctx as unknown as { workspaceRegistry?: WorkspaceRegistryService }).workspaceRegistry
-  const { attachments, approval, agentPresets } = resolveOptionalServices(ctx, log)
+  const { attachments, approval, agentPresets, webServer } = resolveOptionalServices(ctx, log)
 
   const api = new QQApi(config, log)
   const refIndex = new RefIndexStore(join(storages, 'qq-refindex.jsonl'))
   const routes = new RouteStore(join(storages, 'qq-routes.json'))
   const alwaysAllow = new AlwaysAllowStore(join(storages, 'qq-always-allow.json'))
   const threads = new ThreadStore(join(storages, 'qq-threads.json'))
+  // QQ-side ask_user_question forwarding: renders the agent's questions on QQ
+  // (buttons/numbered text) and settles them from the chat. Disabled by
+  // config.questions=false, in which case the host UI provider keeps them.
+  const questions = config.questions === false ? undefined : new QuestionBridge({ config, api, log, routes })
 
   const inbound = new InboundPipeline({
     config,
@@ -110,9 +119,13 @@ export function apply(ctx: Context, config: Config): void {
     attachments,
     approval,
     threads,
+    questions,
   })
   const outbound = new OutboundPipeline({ config, api, log, routes, alwaysAllow, inbound })
   outbound.bind(ctx)
+  // Flush the debounce buffer before presenting a question so the model's
+  // preamble precedes the question in the chat.
+  questions?.attachHooks({ onPresent: (sessionId: string) => outbound.flushText(sessionId) })
 
   // Now that outbound exists, build the handlers that close over it.
   const onSlashCommand = createSlashHandler({ log, alwaysAllow, threads, agents, approval, outbound, agentPresets })
@@ -137,6 +150,7 @@ export function apply(ctx: Context, config: Config): void {
       ? undefined
       : (sessionId: string) => agentPresets.resolve(threads.presetFor(sessionId) ?? presetOverride),
     agentPresets,
+    questions,
   })
   // The two callbacks above close over the same pipelines that depend on
   // them; attach them after construction so the cycle resolves cleanly.
@@ -161,6 +175,12 @@ export function apply(ctx: Context, config: Config): void {
           void api.ackInteraction(interaction.id).catch((error: unknown) => {
             logger.warn('interaction ack failed: %o', error)
           })
+          return
+        }
+        if (questions?.handleInteraction(interaction.buttonData) === true) {
+          void api.ackInteraction(interaction.id).catch((error: unknown) => {
+            logger.warn('interaction ack failed: %o', error)
+          })
         }
       },
       onReady: () => { logger.info('QQ gateway ready (appid=%s)', config.id) },
@@ -168,6 +188,17 @@ export function apply(ctx: Context, config: Config): void {
     log,
     join(storages, 'qq-gateway-session.json'),
   )
+
+  // Optional HTTP push API: config validation fails the load loudly here; the
+  // route itself is registered inside the lifecycle effect below so Cordis
+  // owns its teardown together with the gateway.
+  let httpApiMount: ReturnType<typeof resolveHttpApiMount> | undefined
+  if (config.httpApi?.enable === true) {
+    if (webServer === undefined) {
+      throw new Error('qqbot-community: httpApi.enable=true，但宿主未提供 webServer 服务（该 API 仅在 dsh web 等 Web 组合下可用）')
+    }
+    httpApiMount = resolveHttpApiMount(config.httpApi)
+  }
 
   ctx.effect(() => {
     // All startup work runs inside the effect so Cordis owns its teardown.
@@ -179,6 +210,27 @@ export function apply(ctx: Context, config: Config): void {
     void alwaysAllow.load()
     void threads.load()
     void gateway.start()
+
+    // Registered after the stores start loading: the channels endpoint reads
+    // them, and the webServer tolerates requests racing a still-loading store.
+    let stopHttpApi: (() => void) | undefined
+    if (httpApiMount !== undefined && webServer !== undefined) {
+      stopHttpApi = webServer.register({
+        kind: 'prefix',
+        path: httpApiMount.path,
+        handler: createHttpApiHandler({
+          mountPath: httpApiMount.path,
+          token: httpApiMount.token,
+          config,
+          log,
+          api,
+          routes,
+          threads,
+          ensureAgent: (sessionId: string) => inbound.ensureAgent(sessionId),
+        }),
+      })
+      logger.info('httpApi: 已挂载 POST %s/send 与 GET %s/channels', httpApiMount.path, httpApiMount.path)
+    }
 
     const onAgentDisposed = ctx.on as unknown as (
       name: 'agent/disposed',
@@ -194,9 +246,12 @@ export function apply(ctx: Context, config: Config): void {
     })
 
     return () => {
+      // Remove the HTTP route first so no new request reaches a dying plugin.
+      stopHttpApi?.()
       if (typeof stopDisposed === 'function') stopDisposed()
       void outbound.disposeAllStreams()
       inbound.dispose()
+      questions?.disposeAll()
       gateway.dispose()
       api.dispose()
       void outbound.dispose()

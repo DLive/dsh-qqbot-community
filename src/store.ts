@@ -57,6 +57,11 @@ export class RouteStore {
     return this.routes[sessionId]
   }
 
+  /** Snapshot every known route (session id → record), for the HTTP channels listing. */
+  entries(): { sessionId: string; record: RouteRecord }[] {
+    return Object.entries(this.routes).map(([sessionId, record]) => ({ sessionId, record }))
+  }
+
   /**
    * Consume a passive-reply anchor: returns the inbound msg id while the
    * window is open and under the reply budget, otherwise undefined (send as
