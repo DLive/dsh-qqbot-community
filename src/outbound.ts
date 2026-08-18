@@ -71,6 +71,12 @@ interface StreamState {
   msgSeq: number
   index: number
   lastAccepted: string
+  /** Latest candidate not yet sent; drained strictly one frame at a time. */
+  pending?: string
+  /** True while a frame request is in flight (QQ accepts one replace frame at a time). */
+  inFlight: boolean
+  /** True once the stream is being closed: the drain loop must stop and never send another frame. */
+  closing: boolean
   streamMsgId?: string
   sentFrames: number
   failed: boolean
@@ -160,12 +166,12 @@ export class OutboundPipeline {
   private resetTurn(sessionId: string): void {
     const stream = this.streams.get(sessionId)
     if (stream !== undefined) {
+      this.streams.delete(sessionId)
       // The turn ended without an assistant/message (e.g. aborted): finalize
       // whatever was streamed so QQ does not keep a "generating" bubble.
       if (stream.sentFrames > 0 && !stream.failed) {
-        void this.sendStreamFrame(sessionId, stream, stream.lastAccepted, 10)
+        void this.finishStream(sessionId, stream, stream.lastAccepted)
       }
-      this.streams.delete(sessionId)
     }
     this.flushBuffer(sessionId, true)
   }
@@ -179,14 +185,10 @@ export class OutboundPipeline {
   async closeStream(sessionId: string): Promise<void> {
     const stream = this.streams.get(sessionId)
     if (stream === undefined) return
-    if (stream.sentFrames > 0 && !stream.failed) {
-      try {
-        await this.sendStreamFrame(sessionId, stream, stream.lastAccepted, 10)
-      } catch (error) {
-        this.deps.log.warn('QQ closeStream on %s failed: %o', sessionId, error)
-      }
-    }
     this.streams.delete(sessionId)
+    if (stream.sentFrames > 0 && !stream.failed) {
+      await this.finishStream(sessionId, stream, stream.lastAccepted)
+    }
   }
 
   /** Close every active stream; used during plugin teardown. */
@@ -207,19 +209,49 @@ export class OutboundPipeline {
         msgSeq: nextMsgSeq(),
         index: 0,
         lastAccepted: '',
+        pending: undefined,
+        inFlight: false,
+        closing: false,
         sentFrames: 0,
         failed: false,
         lastSentAt: 0,
       }
       this.streams.set(sessionId, stream)
     }
-    if (stream.failed) return
-    const candidate = prefixMatches(stream.lastAccepted, delta)
+    if (stream.failed || stream.closing) return
+    stream.pending = prefixMatches(stream.lastAccepted, delta)
       ? delta
       : stream.lastAccepted + delta.slice(longestCommonPrefix(stream.lastAccepted, delta))
-    const throttle = this.deps.config.streamThrottleMs ?? 1_200
-    if (Date.now() - stream.lastSentAt < throttle) return
-    void this.sendStreamFrame(sessionId, stream, candidate, 1)
+    void this.drainStream(sessionId, stream)
+  }
+
+  /**
+   * Send queued stream content strictly one frame at a time. QQ rejects
+   * concurrent replace-mode frames for one stream (40034021 "其它流式消息
+   * 发送中"), and the previous fire-and-forget throttling only stamped
+   * `lastSentAt` after the request settled, so every delta that arrived
+   * while a frame was in flight passed the throttle and raced it.
+   */
+  private async drainStream(sessionId: string, stream: StreamState): Promise<void> {
+    if (stream.inFlight || stream.failed || stream.closing) return
+    stream.inFlight = true
+    try {
+      while (!stream.failed && !stream.closing && stream.pending !== undefined) {
+        const throttle = this.deps.config.streamThrottleMs ?? 1_200
+        const wait = throttle - (Date.now() - stream.lastSentAt)
+        if (wait > 0) {
+          await new Promise(resolve => setTimeout(resolve, wait))
+          continue
+        }
+        const text = stream.pending
+        stream.pending = undefined
+        await this.sendStreamFrame(sessionId, stream, text, 1)
+      }
+    } finally {
+      stream.inFlight = false
+      // A delta may have landed after the loop drained its last frame.
+      if (!stream.failed && !stream.closing && stream.pending !== undefined) void this.drainStream(sessionId, stream)
+    }
   }
 
   private async sendStreamFrame(
@@ -227,12 +259,12 @@ export class OutboundPipeline {
     stream: StreamState,
     text: string,
     state: 1 | 10,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const target = this.targetOf(sessionId)
-    if (target.kind !== 'c2c') return
+    if (target.kind !== 'c2c') return false
     const anchor = this.deps.routes.get(sessionId)
     const msgId = anchor?.lastMsgId
-    if (msgId === undefined) return
+    if (msgId === undefined) return false
     try {
       const streamMsgId = await this.deps.api.sendStreamFrame(target.userId, {
         msgSeq: stream.msgSeq,
@@ -247,10 +279,45 @@ export class OutboundPipeline {
       stream.lastSentAt = Date.now()
       stream.sentFrames += 1
       if (streamMsgId !== undefined && stream.streamMsgId === undefined) stream.streamMsgId = streamMsgId
+      return true
     } catch (error) {
       stream.failed = true
       this.deps.log.warn('QQ stream frame failed; falling back to static delivery: %o', error)
+      return false
     }
+  }
+
+  /**
+   * Close a C2C stream with a DONE (input_state=10) frame, retrying a few
+   * times: a lost DONE leaves the stream "sending" on QQ's side and the next
+   * stream then fails with 40034021 ("其它流式消息发送中").
+   */
+  private async sendDoneFrame(sessionId: string, stream: StreamState, text: string): Promise<void> {
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      if (await this.sendStreamFrame(sessionId, stream, text, 10)) return
+      if (attempt === 3) return
+      this.deps.log.warn('QQ DONE frame attempt %d on %s failed; retrying', attempt, sessionId)
+      await new Promise(resolve => setTimeout(resolve, 400 * attempt))
+    }
+  }
+
+  /**
+   * Wait for any in-flight frame, drop unsent candidates, then close the
+   * stream with a DONE frame. Used at turn end and on external close so the
+   * DONE frame never races a still-flying GENERATING frame of the same
+   * stream (QQ treats that as a second concurrent stream, 40034021). The
+   * `closing` flag is set FIRST: a drain loop sleeping on the throttle must
+   * stop when it wakes, otherwise it would send one more frame against an
+   * anchor the static delivery already consumed (QQ then answers
+   * 40007 "已经提交的消息内容不可修改").
+   */
+  private async finishStream(sessionId: string, stream: StreamState, text: string): Promise<void> {
+    stream.closing = true
+    stream.pending = undefined
+    while (stream.inFlight) {
+      await new Promise(resolve => setTimeout(resolve, 50))
+    }
+    await this.sendDoneFrame(sessionId, stream, text)
   }
 
   // ── Static delivery with debounce ──────────────────────────────────────────
@@ -260,15 +327,17 @@ export class OutboundPipeline {
     if (stream !== undefined && !stream.failed && stream.sentFrames > 0 && text.length > 0) {
       // The streamed bubble already shows this text: close it as DONE and let
       // the rendered content stand (QQ replace mode keeps the final frame).
-      if (prefixMatches(text, stream.lastAccepted) || stream.lastAccepted.startsWith(text)) {
-        await this.sendStreamFrame(sessionId, stream, text.length >= stream.lastAccepted.length ? text : stream.lastAccepted, 10)
+      // `prefixMatches` means "incoming starts with accepted", so the accepted
+      // prefix comes first and the full text second.
+      if (prefixMatches(stream.lastAccepted, text) || stream.lastAccepted.startsWith(text)) {
         this.streams.delete(sessionId)
+        await this.finishStream(sessionId, stream, text.length >= stream.lastAccepted.length ? text : stream.lastAccepted)
         return
       }
       // Diverged (model rewrote): finalize what was streamed, then send the
       // authoritative text as a static follow-up message.
-      await this.sendStreamFrame(sessionId, stream, stream.lastAccepted, 10)
       this.streams.delete(sessionId)
+      await this.finishStream(sessionId, stream, stream.lastAccepted)
     }
 
     if (text.length === 0) return

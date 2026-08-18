@@ -58,11 +58,18 @@ export class QQApiError extends Error {
   }
 }
 
-/** Per-target message sequence in the 0..65535 range (QQ requirement). */
+/**
+ * Per-process monotonic message sequence in the 0..65535 range (QQ
+ * requirement). A shared counter keeps `msg_seq` collision-free across
+ * streams and static sends; the random xor generator it replaces could emit
+ * the same seq for two in-flight streams, which QQ rejects with
+ * 40054005 ("消息被去重，请检查请求msgseq").
+ */
+let msgSeq = 0
+
 export function nextMsgSeq(): number {
-  const timePart = Date.now() % 100_000_000
-  const random = Math.floor(Math.random() * 65_536)
-  return (timePart ^ random) % 65_536
+  msgSeq = (msgSeq + 1) % 65_536
+  return msgSeq
 }
 
 export class QQApi {
