@@ -156,6 +156,28 @@ export class OutboundPipeline {
       await this.onAssistantMessage(sessionId, text)
       return
     }
+    if (event.type === 'tool/result') {
+      const result = event.data.result
+      if (result === undefined) return
+      if (result.error !== undefined && result.error.length > 0) {
+        // Errors are always surfaced to the user.
+        const toolName = result.name ?? result.callId ?? '工具'
+        const errText = result.error.length > 500 ? result.error.slice(0, 500) + '…' : result.error
+        await this.sendStatic(sessionId, `⚠️ **${toolName}** 执行失败：\n\`\`\`\n${errText}\n\`\`\``)
+      } else if (this.deps.config.showToolResults === true) {
+        // Success results are only shown if explicitly enabled.
+        const toolName = result.name ?? result.callId ?? '工具'
+        const content = (result.content ?? [])
+          .filter((b): b is { readonly type: string; readonly text: string } => b.type === 'text' && typeof b.text === 'string')
+          .map((b) => b.text)
+          .join('')
+        if (content.length > 0) {
+          const truncated = content.length > 1500 ? content.slice(0, 1500) + '…（已截断）' : content
+          await this.sendStatic(sessionId, `✅ **${toolName}**:\n\`\`\`\n${truncated}\n\`\`\``)
+        }
+      }
+      return
+    }
   }
 
   private targetOf(sessionId: string): ReplyTarget {

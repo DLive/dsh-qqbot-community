@@ -15,6 +15,7 @@ import {
   type AgentRegistryService,
   type ApprovalServiceLike,
   type AttachmentStoreService,
+  type CompactionService,
   type SessionPersistenceService,
   type WebServerService,
   type WorkspaceRegistryService,
@@ -32,6 +33,8 @@ import { createSetupAgent } from './setup-agent.js'
 import { QuestionBridge } from './questions.js'
 import { ThreadStore } from './threadstore.js'
 import { createHttpApiHandler, resolveHttpApiMount } from './http-api.js'
+import { IdleEvictor } from './idle-evictor.js'
+import { MediaCleaner } from './media-cleaner.js'
 import { Config, type Config as ConfigType } from './config.js'
 
 // Re-export the schema so DSH can mount this plugin via `name: 'qqbot-community'`.
@@ -53,12 +56,14 @@ function resolveOptionalServices(ctx: Context, log: ReturnType<typeof createLogS
   approval: ApprovalServiceLike | undefined
   agentPresets: AgentPresetsLike | undefined
   webServer: WebServerService | undefined
+  compaction: CompactionService | undefined
 } {
   const get = ctx.get as (name: string, strict?: boolean) => unknown
   const attachments = get('attachments', false) as AttachmentStoreService | undefined
   const approval = get('approval', false) as ApprovalServiceLike | undefined
   const agentPresets = get('agentPresets', false) as AgentPresetsLike | undefined
   const webServer = get('webServer', false) as WebServerService | undefined
+  const compaction = get('compaction', false) as CompactionService | undefined
   if (attachments === undefined && log.debug !== undefined) {
     log.debug('attachments service not present; image attachments will fall back to text paths')
   }
@@ -68,7 +73,7 @@ function resolveOptionalServices(ctx: Context, log: ReturnType<typeof createLogS
   if (agentPresets === undefined && log.debug !== undefined) {
     log.debug('agentPresets service not present; QQ agents will run on the empty global layer')
   }
-  return { attachments, approval, agentPresets, webServer }
+  return { attachments, approval, agentPresets, webServer, compaction }
 }
 
 /** Strict, narrow validator for QQ INTERACTION_CREATE payloads. */
@@ -96,7 +101,7 @@ export function apply(ctx: Context, config: Config): void {
   const agents = (ctx as unknown as { agents: AgentRegistryService }).agents
   const sessionPersistence = (ctx as unknown as { sessionPersistence?: SessionPersistenceService }).sessionPersistence
   const workspaceRegistry = (ctx as unknown as { workspaceRegistry?: WorkspaceRegistryService }).workspaceRegistry
-  const { attachments, approval, agentPresets, webServer } = resolveOptionalServices(ctx, log)
+  const { attachments, approval, agentPresets, webServer, compaction } = resolveOptionalServices(ctx, log)
 
   const api = new QQApi(config, log)
   const refIndex = new RefIndexStore(join(storages, 'qq-refindex.jsonl'))
@@ -128,7 +133,7 @@ export function apply(ctx: Context, config: Config): void {
   questions?.attachHooks({ onPresent: (sessionId: string) => outbound.flushText(sessionId) })
 
   // Now that outbound exists, build the handlers that close over it.
-  const onSlashCommand = createSlashHandler({ log, alwaysAllow, threads, agents, approval, outbound, agentPresets })
+  const onSlashCommand = createSlashHandler({ log, alwaysAllow, threads, agents, approval, outbound, agentPresets, compaction, sessionPersistence })
   // `config.agentPreset` carries schemastery's `.default('standard')`, so it
   // is always a non-empty string at runtime; we still defensively fall back
   // to 'standard' for any empty override written by hand.
@@ -151,11 +156,31 @@ export function apply(ctx: Context, config: Config): void {
       : (sessionId: string) => agentPresets.resolve(threads.presetFor(sessionId) ?? presetOverride),
     agentPresets,
     questions,
+    groupPrompt: config.groupPrompt,
+    directPrompt: config.directPrompt,
   })
   // The two callbacks above close over the same pipelines that depend on
   // them; attach them after construction so the cycle resolves cleanly.
   const hooks: InboundHooks = { onSlashCommand, setupAgent }
   inbound.attachHooks(hooks)
+
+  // Idle eviction: automatically dispose agents that have been silent for
+  // longer than sessionIdleTimeout. A timeout of 0 disables eviction.
+  const idleEvictor = new IdleEvictor({
+    agents,
+    routes,
+    log,
+    sessionIdleTimeout: config.sessionIdleTimeout ?? 1_800_000,
+  })
+
+  // Media cleanup: periodically remove downloaded files whose mtime exceeds
+  // the configured TTL. A ttlHours of 0 disables cleanup.
+  const mediaDir = join(config.cwd ?? process.cwd(), '.qq-media')
+  const mediaCleaner = new MediaCleaner({
+    mediaDir,
+    ttlHours: config.mediaTtlHours ?? 24,
+    log,
+  })
 
   const gateway = new QQGateway(
     config,
@@ -210,6 +235,8 @@ export function apply(ctx: Context, config: Config): void {
     void alwaysAllow.load()
     void threads.load()
     void gateway.start()
+    idleEvictor.start()
+    mediaCleaner.start()
 
     // Registered after the stores start loading: the channels endpoint reads
     // them, and the webServer tolerates requests racing a still-loading store.
@@ -249,6 +276,8 @@ export function apply(ctx: Context, config: Config): void {
       // Remove the HTTP route first so no new request reaches a dying plugin.
       stopHttpApi?.()
       if (typeof stopDisposed === 'function') stopDisposed()
+      idleEvictor.dispose()
+      mediaCleaner.dispose()
       void outbound.disposeAllStreams()
       inbound.dispose()
       questions?.disposeAll()

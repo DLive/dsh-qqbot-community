@@ -47,6 +47,10 @@ export interface SetupDeps {
   readonly agentPresets: AgentPresetsLike | undefined
   /** QQ-side user-questions bridge; `undefined` disables the forwarding. */
   readonly questions: QuestionBridge | undefined
+  /** Extra system-prompt text for group-chat sessions (optional). */
+  readonly groupPrompt: string | undefined
+  /** Extra system-prompt text for C2C (private) sessions (optional). */
+  readonly directPrompt: string | undefined
 }
 
 /** Built handler compatible with `InboundPipeline.InboundDeps.setupAgent`. */
@@ -56,7 +60,7 @@ export type SetupHandler = (
 ) => void | Promise<void>
 
 export function createSetupAgent(deps: SetupDeps): SetupHandler {
-  const { log, api, routes, outbound, workspaceRegistry, defaultCwd, resolvePreset, agentPresets, questions } = deps
+  const { log, api, routes, outbound, workspaceRegistry, defaultCwd, resolvePreset, agentPresets, questions, groupPrompt, directPrompt } = deps
   return async (agentCtx, sessionId) => {
     // 1. Join the agent's preset FIRST so its tools, prompt sections, and
     //    skill catalog are in scope before any QQ-only tool registers.
@@ -84,6 +88,29 @@ export function createSetupAgent(deps: SetupDeps): SetupHandler {
         + '(only QQ-specific tools will be visible). Load an agent-presets plugin in the host composition.',
         sessionId,
       )
+    }
+
+    // 1b. Register a scope-specific extra system-prompt section when configured.
+    //     `groupPrompt` / `directPrompt` are appended after the preset's own prompt
+    //     sections. The host DSH `agent/system-prompt` event carries a mutable
+    //     sections array; listeners push additional entries. This is a best-effort
+    //     injection — if the host version doesn't emit that event the config value
+    //     is silently skipped (no user-visible error).
+    const scopeKind = sessionId.includes(':c2c:') ? 'c2c' : sessionId.includes(':group:') ? 'group' : undefined
+    const extraPrompt = scopeKind === 'group' ? groupPrompt : scopeKind === 'c2c' ? directPrompt : undefined
+    if (extraPrompt !== undefined && extraPrompt.length > 0) {
+      try {
+        const onSystemPrompt = agentCtx.on as unknown as (
+          event: 'agent/system-prompt',
+          handler: (sections: Array<{ text: string; weight?: number }>) => void,
+        ) => () => void
+        onSystemPrompt('agent/system-prompt', (sections) => {
+          sections.push({ text: extraPrompt, weight: 100 })
+        })
+        log.info('QQ setupAgent: registered %s scope extra prompt for %s', scopeKind, sessionId)
+      } catch (error) {
+        log.debug?.('QQ setupAgent: system-prompt injection not supported by host: %o', error)
+      }
     }
 
     // 2. Register the QQ-specific scoped tools and approval answerer.
