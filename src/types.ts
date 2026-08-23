@@ -47,10 +47,15 @@ export interface Config {
    */
   agentPreset?: string
   debug?: boolean
-  /** C2C sender openids allowed to use the bot; '*' wildcard; empty = allow all. */
+  /** C2C sender openids allowed to use the bot; '*' wildcard; empty = allow all; 'disabled' blocks all. */
   allowFrom?: string[]
-  /** Group openids allowed to use the bot; '*' wildcard; empty = allow all. */
+  /** Group openids allowed to use the bot; '*' wildcard; empty = allow all; 'disabled' blocks all. */
   groupAllowFrom?: string[]
+  /**
+   * Require the bot to be @-mentioned in group messages before processing them.
+   * Mirrors `requireMention` in the reference implementation. Default: false.
+   */
+  requireMention?: boolean
   /** Send replies as markdown (msg_type 2). Requires approved markdown permission. */
   markdown?: boolean
   /** Maximum characters per static reply chunk. */
@@ -69,6 +74,10 @@ export interface Config {
   replyPassiveLimit?: number
   /** Download inbound non-image attachments into <cwd>/.qq-media. */
   mediaDownload?: boolean
+  /** Maximum size (MB) for non-image attachment downloads; default 200. */
+  mediaMaxMB?: number
+  /** How long to keep downloaded media files before cleanup (hours); 0 = keep forever. Default 24. */
+  mediaTtlHours?: number
   /** Optional speech-to-text for inbound voice (OpenAI-compatible). */
   stt?: SttConfig
   /** Register the QQ inline-keyboard approval answerer for QQ agents. */
@@ -81,8 +90,28 @@ export interface Config {
   questionTimeoutMs?: number
   /** Render single-choice questions as QQ inline-keyboard buttons (opt-in). */
   questionButtons?: boolean
-  /** Intercept /help /ping /me /approve /always commands before the agent. */
+  /** Intercept /help /ping /me /approve /always /stop /compact /status /new /presets /reset /clear commands before the agent. */
   slashCommands?: boolean
+  /**
+   * Show successful tool-call results as QQ messages (errors are always shown).
+   * Mirrors `showToolResults` in the reference implementation. Default: false.
+   */
+  showToolResults?: boolean
+  /**
+   * Session idle timeout (ms). Sessions with no inbound activity for this long
+   * are automatically evicted. Default: 1 800 000 ms (30 min). 0 = never evict.
+   */
+  sessionIdleTimeout?: number
+  /**
+   * Extra system-prompt text appended for group-chat sessions.
+   * Mirrors `groupPrompt` in the reference implementation.
+   */
+  groupPrompt?: string
+  /**
+   * Extra system-prompt text appended for C2C (private) sessions.
+   * Mirrors `directPrompt` in the reference implementation.
+   */
+  directPrompt?: string
   /** Optional HTTP push API mounted on the host webServer (off by default). */
   httpApi?: HttpApiConfig
 }
@@ -340,6 +369,26 @@ export interface ToolRegistryService {
   }): () => void
 }
 
+/**
+ * Structural view of the DSH host session-compaction service.
+ * Used by the `/compact` slash command to trigger in-place history compaction.
+ */
+export interface CompactionService {
+  /** Compact the named session now; resolves when compaction finishes. */
+  compactNow(sessionId: string): Promise<CompactionOutcome>
+}
+
+export interface CompactionOutcome {
+  readonly ok: boolean
+  /** Number of events shadowed (replaced by the summary). */
+  readonly shadowed?: number
+  /** Approximate token count of the shadowed events. */
+  readonly tokens?: number
+  /** When `ok` is false: why compaction could not run. */
+  readonly reason?: 'no-session' | 'busy' | 'unavailable' | string
+  readonly message?: string
+}
+
 /** Session event payload shapes the outbound pipeline reads. */
 export interface SessionEventShape {
   readonly type: string
@@ -347,6 +396,21 @@ export interface SessionEventShape {
     readonly turn?: number
     readonly chunk?: { readonly type: string; readonly index?: number; readonly text?: string }
     readonly message?: { readonly content?: readonly ContentBlockLike[] }
+    /** Present on `tool/call` events. */
+    readonly call?: {
+      readonly id?: string
+      readonly name?: string
+      readonly arguments?: unknown
+    }
+    /** Present on `tool/result` events. */
+    readonly result?: {
+      readonly callId?: string
+      readonly name?: string
+      readonly error?: string
+      readonly content?: readonly ContentBlockLike[]
+    }
+    /** Present on `turn/end`: signals abnormal completion. */
+    readonly error?: string
   }
 }
 

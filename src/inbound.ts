@@ -30,11 +30,55 @@ export const SESSION_PREFIX = 'qq:v2'
 
 /** LRU caps for inbound dedup. */
 const DEDUP_MAX = 2_000
-/** Voice/file download budget. */
-const DOWNLOAD_MAX_BYTES = 100 * 1024 * 1024
+/** Voice/file download budget (default; overridden by config.mediaMaxMB). */
+const DOWNLOAD_MAX_BYTES_DEFAULT = 200 * 1024 * 1024
 const DOWNLOAD_TIMEOUT_MS = 120_000
 /** Media formats the attachment service accepts as ImageBlocks. */
 const IMAGE_MEDIA_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif'])
+
+/** Private / loopback IPv4 ranges that must never be reached from user-supplied URLs (SSRF). */
+const PRIVATE_RANGES: Array<{ prefix: number; bits: number }> = [
+  { prefix: 0x0a000000, bits: 8 },  // 10.0.0.0/8
+  { prefix: 0xac100000, bits: 12 }, // 172.16.0.0/12
+  { prefix: 0xc0a80000, bits: 16 }, // 192.168.0.0/16
+  { prefix: 0x7f000000, bits: 8 },  // 127.0.0.0/8
+  { prefix: 0xa9fe0000, bits: 16 }, // 169.254.0.0/16  (link-local)
+  { prefix: 0xe0000000, bits: 4 },  // 224.0.0.0/4     (multicast)
+]
+
+function ipv4ToInt(ip: string): number | undefined {
+  const parts = ip.split('.')
+  if (parts.length !== 4) return undefined
+  let n = 0
+  for (const part of parts) {
+    const octet = parseInt(part, 10)
+    if (isNaN(octet) || octet < 0 || octet > 255) return undefined
+    n = (n << 8) + octet
+  }
+  return n >>> 0
+}
+
+/**
+ * Returns true if the resolved IP is in a private/loopback range or is not a
+ * parseable IPv4 address (e.g. IPv6). Non-IPv4 addresses are blocked because
+ * the range checks only cover IPv4; callers must treat them as unsafe.
+ */
+function isPrivateIp(ip: string): boolean {
+  const n = ipv4ToInt(ip)
+  if (n === undefined) return true // IPv6 or unparseable: blocked (no IPv6 range checks)
+  for (const { prefix, bits } of PRIVATE_RANGES) {
+    const mask = bits === 32 ? 0xffffffff : (0xffffffff << (32 - bits)) >>> 0
+    if ((n & mask) === (prefix & mask)) return true
+  }
+  return false
+}
+
+/** Allowlist gate: '*' or an empty list admits everyone; 'disabled' blocks all. */
+export function isAllowed(list: string[] | undefined, id: string): boolean {
+  if (list !== undefined && list.includes('disabled')) return false
+  if (list === undefined || list.length === 0 || list.includes('*')) return true
+  return list.includes(id)
+}
 
 export interface InboundDeps {
   readonly config: Config
@@ -227,12 +271,6 @@ export function stripMentions(text: string, mentions: readonly MentionEntry[]): 
   return cleaned.trim()
 }
 
-/** Allowlist gate: '*' or an empty list admits everyone. */
-export function isAllowed(list: string[] | undefined, id: string): boolean {
-  if (list === undefined || list.length === 0 || list.includes('*')) return true
-  return list.includes(id)
-}
-
 /** Build the model-facing text: quoted message first, then the new content. */
 export function assembleText(
   cleanedText: string,
@@ -265,14 +303,37 @@ function describeAttachments(attachments: readonly InboundAttachment[], voiceTex
   return parts.join('\n')
 }
 
-async function downloadTo(url: string, dir: string, filename: string | undefined): Promise<string | undefined> {
+async function downloadTo(
+  url: string,
+  dir: string,
+  filename: string | undefined,
+  maxBytes: number,
+): Promise<string | undefined> {
   if (!url.startsWith('https://')) return undefined
+  // SSRF guard: resolve the hostname and block private/loopback IP ranges.
+  try {
+    const { hostname } = new URL(url)
+    const { lookup } = await import('node:dns/promises')
+    const resolved = await lookup(hostname)
+    if (isPrivateIp(resolved.address)) return undefined
+  } catch {
+    return undefined
+  }
   try {
     await mkdir(dir, { recursive: true })
-    const response = await fetch(url, { signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS) })
+    const response = await fetch(url, { signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS), redirect: 'error' })
     if (!response.ok) return undefined
-    const buffer = Buffer.from(await response.arrayBuffer())
-    if (buffer.byteLength > DOWNLOAD_MAX_BYTES) return undefined
+    const contentLength = response.headers.get('content-length')
+    if (contentLength !== null && parseInt(contentLength, 10) > maxBytes) return undefined
+    const chunks: Buffer[] = []
+    let totalBytes = 0
+    if (response.body === null) return undefined
+    for await (const chunk of response.body as AsyncIterable<Uint8Array>) {
+      totalBytes += chunk.byteLength
+      if (totalBytes > maxBytes) return undefined
+      chunks.push(Buffer.from(chunk))
+    }
+    const buffer = Buffer.concat(chunks)
     const safeName = (filename ?? `qq-${Date.now()}`).replace(/[/\\:*?"<>|]/g, '_')
     const path = join(dir, safeName)
     await writeFile(path, buffer)
@@ -343,6 +404,18 @@ export class InboundPipeline {
     if (!allowed) {
       if (this.deps.config.debug) this.deps.log.debug?.('dropped message from non-allowlisted sender %s', message.senderId)
       return
+    }
+
+    // requireMention gate: if enabled for groups, drop messages where the bot
+    // is not @-mentioned. Slash commands bypass this gate so /help /ping /me
+    // remain reachable even when requireMention is active.
+    if (message.kind === 'group' && this.deps.config.requireMention === true) {
+      const mentioned = message.mentions.some(m => m.is_you === true)
+      const cleaned0 = message.content.trimStart()
+      if (!mentioned && !cleaned0.startsWith('/')) {
+        if (this.deps.config.debug) this.deps.log.debug?.('requireMention: dropping group message without @mention from %s', message.senderId)
+        return
+      }
     }
 
     // Resolve the effective DSH session id for this target's current thread
@@ -416,6 +489,8 @@ export class InboundPipeline {
     let voiceText: string | undefined
     const cwd = this.deps.config.cwd ?? process.cwd()
     const mediaDir = join(cwd, '.qq-media')
+    const mediaMaxMB = this.deps.config.mediaMaxMB
+    const maxBytes = mediaMaxMB !== undefined ? mediaMaxMB * 1024 * 1024 : DOWNLOAD_MAX_BYTES_DEFAULT
 
     for (const att of message.attachments) {
       const type = att.content_type.toLowerCase()
@@ -438,7 +513,7 @@ export class InboundPipeline {
           voiceText = att.asr_refer_text
           if ((voiceText === undefined || voiceText.length === 0) && this.deps.config.stt !== undefined) {
             const wavUrl = att.voice_wav_url ?? att.url
-            const local = await downloadTo(wavUrl, mediaDir, att.filename)
+            const local = await downloadTo(wavUrl, mediaDir, att.filename, maxBytes)
             if (local !== undefined) {
               voiceText = (await transcribe(this.deps.config.stt, local)) ?? undefined
             }
@@ -446,7 +521,7 @@ export class InboundPipeline {
           continue
         }
         if (this.deps.config.mediaDownload !== false && att.url.length > 0) {
-          const local = await downloadTo(att.url, mediaDir, att.filename)
+          const local = await downloadTo(att.url, mediaDir, att.filename, maxBytes)
           if (local !== undefined) extras.push(`[已下载附件: ${local}]`)
           else extras.push(`[附件下载失败${att.filename !== undefined ? `: ${att.filename}` : ''}]`)
         }

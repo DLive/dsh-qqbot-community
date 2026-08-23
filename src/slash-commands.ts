@@ -1,6 +1,7 @@
 /**
  * Slash commands answered directly by the adapter (never reach the agent):
- *   /help /ping /me /new [preset] /presets /approve /always
+ *   /help /ping /me /new(/reset/clear) [preset] /presets /approve /always
+ *   /stop /compact /status
  *
  * Returns `true` if the command was handled (so the inbound pipeline skips
  * agent delivery), `false` to fall through. The factory pattern lets us
@@ -13,7 +14,9 @@ import type {
   AgentPresetRowLike,
   AgentPresetsLike,
   ApprovalServiceLike,
+  CompactionService,
   IncomingMessage,
+  SessionPersistenceService,
 } from './types.js'
 import type { LogSink } from './qqapi.js'
 import type { AlwaysAllowStore } from './store.js'
@@ -30,6 +33,10 @@ export interface SlashDeps {
   readonly outbound: OutboundPipeline
   /** Present when the host runs the agent-presets service; enables /new <preset> and /presets. */
   readonly agentPresets: AgentPresetsLike | undefined
+  /** Present when the host runs the compaction service; enables /compact. */
+  readonly compaction: CompactionService | undefined
+  /** Present when the host runs the session persistence service; enables /status. */
+  readonly sessionPersistence: SessionPersistenceService | undefined
 }
 
 /** Built handler compatible with `InboundPipeline.InboundDeps.onSlashCommand`. */
@@ -41,7 +48,7 @@ export type SlashHandler = (
 ) => Promise<boolean>
 
 export function createSlashHandler(deps: SlashDeps): SlashHandler {
-  const { log, alwaysAllow, threads, agents, approval, outbound, agentPresets } = deps
+  const { log, alwaysAllow, threads, agents, approval, outbound, agentPresets, compaction, sessionPersistence } = deps
   /** List presets through the host service; `undefined` when unavailable/failed. */
   const listPresets = async (): Promise<readonly AgentPresetRowLike[] | undefined> => {
     if (agentPresets === undefined) return undefined
@@ -61,8 +68,11 @@ export function createSlashHandler(deps: SlashDeps): SlashHandler {
           '/help — 显示可用命令',
           '/ping — 延迟检测',
           '/me — 显示你的 openid',
-          '/new [preset] — 开启新会话（可选 preset id，见 /presets）',
+          '/new [preset]（别名 /reset /clear）— 开启新会话（可选 preset id，见 /presets）',
           '/presets — 列出可用的 agent preset',
+          '/compact — 压缩会话历史（摘要替换旧记录，保留上下文）',
+          '/stop — 中止当前正在生成的回复',
+          '/status — 查看当前会话状态',
           '/approve ask|never|status — 审批策略',
           '/always clear — 清除"始终允许"清单',
         ].join('\n'))
@@ -90,6 +100,8 @@ export function createSlashHandler(deps: SlashDeps): SlashHandler {
           ].join('\n'))
         return true
       }
+      case 'reset':
+      case 'clear':
       case 'new': {
         // Optional argument: the agent preset id the NEW session composes
         // from (validated against the host roster below). Unknown or broken
@@ -110,11 +122,11 @@ export function createSlashHandler(deps: SlashDeps): SlashHandler {
           const found = presets.find(preset => preset.id === arg)
           if (found === undefined) {
             const ids = presets.map(preset => preset.id)
-            await reply(`⚠️ 未知的 preset “${arg}”。可用：${ids.length > 0 ? ids.join(', ') : '（无）'}。\n用 /presets 查看详情。`)
+            await reply(`⚠️ 未知的 preset "${arg}"。可用：${ids.length > 0 ? ids.join(', ') : '（无）'}。\n用 /presets 查看详情。`)
             return true
           }
           if (found.broken !== undefined) {
-            await reply(`⚠️ preset “${arg}” 当前不可用：${found.broken}`)
+            await reply(`⚠️ preset "${arg}" 当前不可用：${found.broken}`)
             return true
           }
           presetId = found.id
@@ -144,6 +156,82 @@ export function createSlashHandler(deps: SlashDeps): SlashHandler {
         await reply(presetId === undefined
           ? `✅ 已开启新会话（#n${thread}）。下次发送的消息将进入 \`${newId}\`。旧的对话仍保留，可手动在侧边栏切换。`
           : `✅ 已开启新会话（#n${thread}，preset=${presetId}）。下次发送的消息将进入 \`${newId}\`。旧的对话仍保留，可手动在侧边栏切换。`)
+        return true
+      }
+      case 'stop': {
+        const agent = agents.get(sessionId)
+        if (agent === undefined) {
+          await reply('⚠️ 当前没有活跃会话，无需中止')
+          return true
+        }
+        try {
+          await outbound.closeStream(sessionId).catch(() => undefined)
+          agent.cancel({ kind: 'user' })
+          await reply('✅ 已中止当前生成')
+        } catch (error) {
+          log.warn('QQ /stop: cancel failed: %o', error)
+          await reply('⚠️ 中止失败，请稍后重试')
+        }
+        return true
+      }
+      case 'compact': {
+        if (compaction === undefined) {
+          await reply('⚠️ 当前环境不支持历史压缩（host 未加载 compaction 服务）')
+          return true
+        }
+        const agent = agents.get(sessionId)
+        if (agent === undefined) {
+          await reply('⚠️ 当前无活跃会话')
+          return true
+        }
+        try {
+          const outcome = await compaction.compactNow(sessionId)
+          if (outcome.ok) {
+            if (!outcome.shadowed || outcome.shadowed === 0) {
+              await reply('没有可压缩的历史')
+            } else {
+              await reply(`✅ 已压缩 ${outcome.shadowed} 条历史记录${outcome.tokens !== undefined ? `（约 ${outcome.tokens} tokens）` : ''}`)
+            }
+          } else {
+            switch (outcome.reason) {
+              case 'busy':
+                await reply('⚠️ 正在生成中，无法压缩')
+                break
+              case 'unavailable':
+                await reply('⚠️ 压缩能力不可用（当前 agent preset 未加载 compaction 服务）')
+                break
+              default:
+                await reply(`⚠️ 压缩失败：${outcome.message ?? outcome.reason ?? '未知错误'}`)
+            }
+          }
+        } catch (error) {
+          log.warn('QQ /compact failed: %o', error)
+          await reply('⚠️ 压缩失败，请稍后重试')
+        }
+        return true
+      }
+      case 'status': {
+        const agent = agents.get(sessionId)
+        if (agent === undefined) {
+          await reply('当前无活跃会话（发送消息以开始对话）')
+          return true
+        }
+        const lines: string[] = [
+          `🤖 会话状态`,
+          `- Session ID: \`${sessionId}\``,
+          `- 会话类型: ${message.kind}`,
+          `- 发送者: \`${message.senderId}\``,
+        ]
+        if (sessionPersistence !== undefined) {
+          try {
+            const inspected = await sessionPersistence.inspect(sessionId)
+            lines.push(`- 创建时间: ${new Date(inspected.meta.createdAt).toLocaleString()}`)
+            lines.push(`- 历史消息: ${Array.isArray(inspected.events) ? inspected.events.length : '?'} 条`)
+          } catch {
+            // Session not yet persisted or inspection failed — skip those lines.
+          }
+        }
+        await reply(lines.join('\n'))
         return true
       }
       case 'approve': {
