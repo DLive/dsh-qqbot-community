@@ -28,7 +28,7 @@ export const Config = Schema.object({
   allowFrom: Schema.array(Schema.string()).default(['*']).description("C2C 发送者 openid 白名单（'*' 通配，留空放行；'disabled' 关闭 C2C）"),
   groupAllowFrom: Schema.array(Schema.string()).default(['*']).description("群 openid 白名单（'disabled' 关闭群聊）"),
   requireMention: Schema.boolean().default(false).description('群聊是否需要 @bot 才触发（默认 false，对所有群消息响应）'),
-  markdown: Schema.boolean().default(false).description('以 markdown (msg_type 2) 发送回复，需开通权限'),
+  markdown: Schema.boolean().default(true).description('以 markdown (msg_type 2) 发送回复，需开通权限'),
   textChunkLimit: Schema.number().default(4000).description('单条静态回复的最大字符数'),
   typing: Schema.boolean().default(true).description('C2C 输入中指示（60s 窗口自动续发）'),
   streaming: Schema.boolean().default(true).description('C2C 流式回复（stream_messages 替换模式）'),
