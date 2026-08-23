@@ -58,10 +58,14 @@ function ipv4ToInt(ip: string): number | undefined {
   return n >>> 0
 }
 
-/** Returns true if the resolved IP is in a private/loopback range. */
+/**
+ * Returns true if the resolved IP is in a private/loopback range or is not a
+ * parseable IPv4 address (e.g. IPv6). Non-IPv4 addresses are blocked because
+ * the range checks only cover IPv4; callers must treat them as unsafe.
+ */
 function isPrivateIp(ip: string): boolean {
   const n = ipv4ToInt(ip)
-  if (n === undefined) return true // IPv6 or unparseable: skip download
+  if (n === undefined) return true // IPv6 or unparseable: blocked (no IPv6 range checks)
   for (const { prefix, bits } of PRIVATE_RANGES) {
     const mask = bits === 32 ? 0xffffffff : (0xffffffff << (32 - bits)) >>> 0
     if ((n & mask) === (prefix & mask)) return true
@@ -317,10 +321,19 @@ async function downloadTo(
   }
   try {
     await mkdir(dir, { recursive: true })
-    const response = await fetch(url, { signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS) })
+    const response = await fetch(url, { signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS), redirect: 'error' })
     if (!response.ok) return undefined
-    const buffer = Buffer.from(await response.arrayBuffer())
-    if (buffer.byteLength > maxBytes) return undefined
+    const contentLength = response.headers.get('content-length')
+    if (contentLength !== null && parseInt(contentLength, 10) > maxBytes) return undefined
+    const chunks: Buffer[] = []
+    let totalBytes = 0
+    if (response.body === null) return undefined
+    for await (const chunk of response.body as AsyncIterable<Uint8Array>) {
+      totalBytes += chunk.byteLength
+      if (totalBytes > maxBytes) return undefined
+      chunks.push(Buffer.from(chunk))
+    }
+    const buffer = Buffer.concat(chunks)
     const safeName = (filename ?? `qq-${Date.now()}`).replace(/[/\\:*?"<>|]/g, '_')
     const path = join(dir, safeName)
     await writeFile(path, buffer)
@@ -476,8 +489,8 @@ export class InboundPipeline {
     let voiceText: string | undefined
     const cwd = this.deps.config.cwd ?? process.cwd()
     const mediaDir = join(cwd, '.qq-media')
-    const mediaMaxMB = this.deps.config.mediaMaxMB ?? 200
-    const maxBytes = mediaMaxMB * 1024 * 1024
+    const mediaMaxMB = this.deps.config.mediaMaxMB
+    const maxBytes = mediaMaxMB !== undefined ? mediaMaxMB * 1024 * 1024 : DOWNLOAD_MAX_BYTES_DEFAULT
 
     for (const att of message.attachments) {
       const type = att.content_type.toLowerCase()

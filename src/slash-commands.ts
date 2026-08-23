@@ -165,8 +165,8 @@ export function createSlashHandler(deps: SlashDeps): SlashHandler {
           return true
         }
         try {
-          agent.cancel({ kind: 'user' })
           await outbound.closeStream(sessionId).catch(() => undefined)
+          agent.cancel({ kind: 'user' })
           await reply('✅ 已中止当前生成')
         } catch (error) {
           log.warn('QQ /stop: cancel failed: %o', error)

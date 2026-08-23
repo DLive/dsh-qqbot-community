@@ -90,7 +90,7 @@ export interface Config {
   questionTimeoutMs?: number
   /** Render single-choice questions as QQ inline-keyboard buttons (opt-in). */
   questionButtons?: boolean
-  /** Intercept /help /ping /me /approve /always /stop /compact /status commands before the agent. */
+  /** Intercept /help /ping /me /approve /always /stop /compact /status /new /presets /reset /clear commands before the agent. */
   slashCommands?: boolean
   /**
    * Show successful tool-call results as QQ messages (errors are always shown).
