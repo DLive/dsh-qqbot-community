@@ -594,6 +594,16 @@ export class InboundPipeline {
     const existing = this.deps.agents.get(sessionId)
     if (existing !== undefined) return existing
 
+    // Resolve agentOptions from a per-session `/model` override first; fall
+    // back to the plugin-config defaults when nothing was recorded.
+    const override = this.deps.threads.modelFor(sessionId)
+    const agentOptions = override === undefined
+      ? { provider: this.deps.config.provider, model: this.deps.config.model }
+      : override.model !== undefined
+        ? { provider: override.provider, model: override.model }
+        : { provider: override.provider, model: this.deps.config.model }
+    if (this.deps.config.debug) this.deps.log.debug?.('QQ ensureAgent: agentOptions for %s = %o', sessionId, agentOptions)
+
     let creation = this.agentCreation.get(sessionId)
     if (creation === undefined) {
       this.deps.log.info('QQ ensureAgent: creating agent for %s', sessionId)
@@ -606,7 +616,7 @@ export class InboundPipeline {
         try {
           return (await this.deps.agents.resume({
             resumeSessionId: sessionId,
-            agentOptions: { provider: this.deps.config.provider, model: this.deps.config.model },
+            agentOptions,
             ...(setup !== undefined ? { setup } : {}),
           })).agent
         } catch (error) {
@@ -625,7 +635,7 @@ export class InboundPipeline {
         try {
           const agent = (await this.deps.agents.create({
             sessionId,
-            agentOptions: { provider: this.deps.config.provider, model: this.deps.config.model },
+            agentOptions,
             meta: { cwd },
             ...(setup !== undefined ? { setup } : {}),
           })).agent

@@ -1,6 +1,7 @@
 /**
  * Per-target conversation-thread counter, plus the per-session preset
- * overrides recorded by `/new <preset>`.
+ * overrides recorded by `/new <preset>` and the per-session model overrides
+ * recorded by `/model <provider>[/<model>]`.
  *
  * Each QQ target (c2c user / group / channel) starts on an implicit "thread
  * zero" that reuses the bare `qq:v2:<scope>:<id>` session id. The `/new`
@@ -12,29 +13,41 @@
  * session id, so the agent materializing that id (even after a restart,
  * via create or resume) composes from the requested preset instead of the
  * plugin-config default. A plain `/new` clears any override for the new id.
+ *
+ * The model override is keyed by the SAME session id the inbound pipeline
+ * resolves for the current thread, so the next message in that thread
+ * composes its agent with the chosen provider/model. Pass `undefined` to
+ * `setModel` to clear the override and fall back to the plugin-config default.
  */
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 
-/** On-disk shape (v2): thread counters plus per-session-id preset overrides. */
+/** Per-session model override; `model` is optional (provider alone selects its default model). */
+export interface ModelOverride {
+  readonly provider: string
+  readonly model?: string
+}
+
+/** On-disk shape (v3): thread counters + per-session preset + per-session model overrides. */
 interface ThreadPayload {
   counters: Record<string, number>
   presets: Record<string, string>
+  models: Record<string, ModelOverride>
 }
 
 /** Accept both the v2 object shape and the legacy bare counter map. */
 function normalizePayload(raw: unknown): ThreadPayload {
-  const empty: ThreadPayload = { counters: {}, presets: {} }
+  const empty: ThreadPayload = { counters: {}, presets: {}, models: {} }
   if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return empty
   const record = raw as Record<string, unknown>
-  if (!('counters' in record) && !('presets' in record)) {
+  if (!('counters' in record) && !('presets' in record) && !('models' in record)) {
     // Legacy file: Record<targetKey, number>. Migrate in memory; the next
-    // flush persists the v2 shape.
+    // flush persists the v3 shape.
     const counters: Record<string, number> = {}
     for (const [key, value] of Object.entries(record)) {
       if (typeof value === 'number') counters[key] = value
     }
-    return { counters, presets: {} }
+    return { counters, presets: {}, models: {} }
   }
   const counters: Record<string, number> = {}
   const rawCounters = record.counters
@@ -50,7 +63,21 @@ function normalizePayload(raw: unknown): ThreadPayload {
       if (typeof value === 'string' && value.length > 0) presets[key] = value
     }
   }
-  return { counters, presets }
+  const models: Record<string, ModelOverride> = {}
+  const rawModels = record.models
+  if (rawModels !== null && typeof rawModels === 'object' && !Array.isArray(rawModels)) {
+    for (const [key, value] of Object.entries(rawModels as Record<string, unknown>)) {
+      const entry = value as Record<string, unknown> | null
+      if (entry === null || typeof entry !== 'object') continue
+      const provider = entry.provider
+      const model = entry.model
+      if (typeof provider !== 'string' || provider.length === 0) continue
+      models[key] = model === undefined
+        ? { provider }
+        : (typeof model === 'string' && model.length > 0 ? { provider, model } : { provider })
+    }
+  }
+  return { counters, presets, models }
 }
 
 async function readJson(file: string): Promise<unknown> {
@@ -76,7 +103,7 @@ export function targetKey(target: { kind: 'c2c'; userId: string } | { kind: 'gro
 }
 
 export class ThreadStore {
-  private payload: ThreadPayload = { counters: {}, presets: {} }
+  private payload: ThreadPayload = { counters: {}, presets: {}, models: {} }
   private writing: Promise<void> = Promise.resolve()
 
   constructor(private readonly file: string) {}
@@ -114,6 +141,25 @@ export class ThreadStore {
   setPreset(sessionId: string, preset: string | undefined): void {
     if (preset === undefined) delete this.payload.presets[sessionId]
     else this.payload.presets[sessionId] = preset
+    this.flush()
+  }
+
+  /**
+   * The model override recorded for one session id by `/model <provider>[/<model>]`.
+   * @returns the override, or `undefined` to use the plugin-config default.
+   */
+  modelFor(sessionId: string): ModelOverride | undefined {
+    return this.payload.models[sessionId]
+  }
+
+  /**
+   * Record (or clear with `undefined`) the model override for one session id.
+   * Persisted with the counters/presets so a restart between `/model` and
+   * the next message keeps the requested composition.
+   */
+  setModel(sessionId: string, override: ModelOverride | undefined): void {
+    if (override === undefined) delete this.payload.models[sessionId]
+    else this.payload.models[sessionId] = override
     this.flush()
   }
 

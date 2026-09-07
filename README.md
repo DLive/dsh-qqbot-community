@@ -41,7 +41,7 @@ npm install dsh-qqbot-community
 - **审批桥（inline keyboard）**：为每个 QQ 会话注册 agent 作用域 `approval/request` answerer —— 审批请求以三按钮消息送达 QQ（✅ 允许一次 / ⭐ 始终允许 / ❌ 拒绝），按钮回调即决策；"始终允许"按 会话×工具 持久化（`qq-always-allow.json`）。
 - **ask_user_question 转发（`questions`，默认开启）**：agent 调用 `ask_user_question` 时，问题转发到 QQ 对话（否则只出现在 Web UI，QQ 侧会一直"无响应"）。默认以纯文本呈现编号选项，直接回复编号（如 `1,3`）、选项文字或自由文本（多问题按行回答）；`questionButtons: true` 可为 单问题+单选+选项≤5 附加内联键盘按钮（需开通消息按钮权限，沙箱可能不显示，发送失败自动回退纯文本）；无效回答有引导提示且不进入 agent；超时（`questionTimeoutMs`，默认 300s）/turn 取消/会话结束自动收尾。经 agent 作用域 `tools/execute` 拦截实现，不影响 Web UI 的其它会话；`questions: false` 关闭。
 - **QQ API 代理工具**：`qq_api` 工具代理任意 QQ 开放平台 REST 调用（频道/群管理、公告、日程等），自动注入鉴权。
-- **斜杠命令**：`/help` `/ping` `/me` `/new [preset]` `/presets` `/approve ask|never|status` `/always clear`（在投递给 agent 之前拦截，映射 DSH 审批策略；完整列表见下节）。
+- **斜杠命令**：`/help` `/ping` `/me` `/new [preset]` `/presets` `/model [<provider>[/<model>]]` `/approve ask|never|status` `/always clear`（在投递给 agent 之前拦截，映射 DSH 审批策略；完整列表见下节）。
 - **定时提醒**：复用 DSH schedule 子系统（web profile 自带 `schedule_create` 等工具）；提醒到期触发同会话 follow-up，回复经出站管线（含主动降级）送达 QQ。
 - **HTTP 推送 API（`httpApi`，默认关闭）**：在 dsh web 的 HTTP 端口上暴露认证端点，外部系统可把文本直接推送到指定 QQ 通道（不经模型）；`record: true` 可同时向会话注入一条不唤醒模型的记录，让 agent 知晓推送内容。详见下文「HTTP 推送 API」。
 
@@ -59,6 +59,7 @@ Webhook transport、热升级（`/bot-upgrade`/update-checker）、`/bot-logs`/`
 | `/me` | — | 返回当前会话发送者的 `openid`（可选附带昵称），便于排查白名单。 |
 | `/new` | 可选 `preset id` | 强制关闭当前 thread 上的流式回复（`stream_messages` DONE 帧）并取消进行中的 agent，再为同一会话目标分配下一个 thread id（`#n1`、`#n2` …）；旧 session 保留，仍可在侧边栏切换。携带 preset id 时（如 `/new code`），新会话改用该 preset 组装（先对照 host 的 preset 列表校验，未知/损坏的 id 直接报错并列出可选项，不推进 thread）；不带参数则使用 `agentPreset` 配置值。覆盖按新 session id 持久化（`qq-threads.json`），重启后恢复同一会话仍用同一 preset。 |
 | `/presets` | — | 列出 host 当前提供的全部 agent preset（id、名称、损坏原因），供 `/new <id>` 选择。 |
+| `/model` | `[<provider>[/<model>]]` 或 `reset` | 切换当前线程的 AI 模型（见下节）。无参数时显示当前覆盖、host 全部 provider 及其模型清单、已配置的别名与用法；`reset` 清除覆盖回到 plugin-config 默认。切换已存在会话时自动开启新 thread（沿用 preset）。 |
 | `/approve` | `ask` \| `never` \| `status`（缺省 `status`） | `ask`/`never` 切换当前会话的审批策略（仅当 `approval: true` 且当前环境提供了 `approval` 服务时生效）；`status` 列出本会话已"始终允许"的工具名。 |
 | `/always` | `clear` | 清空本会话的"始终允许"清单；其它子命令视为未识别并回落到 agent。 |
 
@@ -87,6 +88,33 @@ Webhook transport、热升级（`/bot-upgrade`/update-checker）、`/bot-logs`/`
 你：/new              ← 不带参数：同样开新会话，但使用 agentPreset 配置的默认 preset
 你：/new foo          ← 未知 id：报错并列出全部可用 id，thread 不推进，当前会话不受影响
 ```
+
+### 按会话切换模型：`/model`
+
+会话的 provider/model 在创建时固定（持久化在会话 header 中），因此切换通过"新会话"完成：当前线程已有活跃 agent 时，`/model` 会像 `/new` 一样取消旧 agent 并开启新 thread（preset 覆盖沿用），再把 model 覆盖记录到新会话 id 上；没有活跃会话时覆盖直接落在当前 id，下一条消息即用新模型。覆盖持久化在 `qq-threads.json`，重启不丢。
+
+**目录发现是动态的**：`/model`（无参数）通过 host 的 `llm` 服务（`ctx.llm.listProviders()` / `listModels()`）列出当前部署实际配置的全部 provider 与模型——插件不做任何路由白名单，`settings.yaml` 里加了新 provider 即自动出现在清单中。host 未加载 `llm` 服务时优雅降级为只显示默认值与用法。
+
+**别名**：`modelAliases` 配置字段（可选）把短名映射到 `"provider"` 或 `"provider/model"`，使命令在多 provider 部署下不必敲全名。别名只是输入糖，解析后的参数与手写全名走完全相同的路径。
+
+**典型对话**：
+
+```text
+你：/model
+机器人：当前线程无 model 覆盖，使用 plugin-config 默认：`deepseek-official/deepseek-v4-flash`
+        - deepseek-official：deepseek-v4-flash、deepseek-v4-pro
+        - zai-coding-cn：glm-5-turbo、glm-5.1、glm-5.2、glm-5.3
+        别名：zai→zai-coding-cn/glm-5.2，fast→openai/gpt-4o-mini
+        用法：/model <provider>[/<model>] 或别名；/model reset 恢复默认
+
+你：/model zai
+机器人：✅ model 已切到 `zai-coding-cn/glm-5.2`（已自动开启新会话 #n2，preset 沿用），下一条消息即用新模型
+
+你：/model zai-coding-cn/glm-5v-turbo    ← 全名直写，任意 provider/model 组合
+你：/model reset                          ← 清除覆盖，回到 plugin-config 默认
+```
+
+**校验**：host 提供清单时，未知 provider 直接拒绝并列出可选项；未知模型予以接受但附加警告——模型 catalog 是建议性的（未列出 id 在部分适配器上原样透传），是否严格校验取决于 provider 路由自身的实现。
 
 ## 接入指南
 
@@ -137,7 +165,10 @@ DSH 的层顺序是：每个 bundle 的 patch → profile 的 `cordis.patch.yml`
     mediaDownload: true        # 非图片附件落盘 <cwd>/.qq-media/
     approval: true             # QQ 内联键盘审批
     approvalTimeoutMs: 300000  # 审批等待超时
-    slashCommands: true        # /help /ping /me /new /approve /always
+    slashCommands: true        # /help /ping /me /new /model /approve /always
+    # modelAliases:            # 可选：/model 命令的短名别名（短名 → "provider" 或 "provider/model"）
+    #   zai: 'zai-coding-cn/glm-5.2'
+    #   fast: 'openai/gpt-4o-mini'
     # stt:                     # 可选：语音转写（OpenAI 兼容）
     #   baseUrl: 'https://api.openai.com/v1'
     #   apiKey: 'sk-...'
