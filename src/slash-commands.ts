@@ -1,6 +1,6 @@
 /**
  * Slash commands answered directly by the adapter (never reach the agent):
- *   /help /ping /me /new(/reset/clear) [preset] /presets /approve /always
+ *   /help /ping(/bot-ping) /me /new(/reset/clear) [preset] /presets /approve /always
  *   /stop /compact /status
  *
  * Returns `true` if the command was handled (so the inbound pipeline skips
@@ -66,7 +66,7 @@ export function createSlashHandler(deps: SlashDeps): SlashHandler {
       case 'help':
         await reply([
           '/help — 显示可用命令',
-          '/ping — 延迟检测',
+          '/ping（别名 /bot-ping）— 检测 QQ→插件网络传输与插件处理延迟',
           '/me — 显示你的 openid',
           '/new [preset]（别名 /reset /clear）— 开启新会话（可选 preset id，见 /presets）',
           '/presets — 列出可用的 agent preset',
@@ -77,9 +77,23 @@ export function createSlashHandler(deps: SlashDeps): SlashHandler {
           '/always clear — 清除"始终允许"清单',
         ].join('\n'))
         return true
-      case 'ping':
-        await reply(`✅ pong（${new Date().toLocaleTimeString()}）`)
+      case 'bot-ping':
+      case 'ping': {
+        const now = Date.now()
+        const eventTime = message.timestamp.length > 0 ? new Date(message.timestamp).getTime() : Number.NaN
+        if (!Number.isFinite(eventTime)) {
+          await reply('✅ pong!')
+          return true
+        }
+        const receivedAt = message.receivedAt ?? now
+        await reply([
+          '✅ pong！',
+          `⏱ 延迟: ${Math.max(0, now - eventTime)}ms`,
+          `  ├ 网络传输: ${Math.max(0, receivedAt - eventTime)}ms`,
+          `  └ 插件处理: ${Math.max(0, now - receivedAt)}ms`,
+        ].join('\n'))
         return true
+      }
       case 'me':
         await reply(`🆔 你的 openid: \`${message.senderId}\`${message.senderName !== undefined ? `（${message.senderName}）` : ''}`)
         return true

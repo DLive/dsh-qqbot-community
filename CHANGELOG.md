@@ -5,8 +5,19 @@
 
 ## [未发布]
 
+### 新增
+
+- **`/ping` 网络延迟分解**：同步上游 `/bot-ping` 能力，保留 `/ping` 并新增 `/bot-ping` 别名；返回 QQ→插件总延迟、网络传输耗时和插件处理耗时。
+
+### 变更
+
+- **作用域提示词适配当前 DSH**：`groupPrompt` / `directPrompt` 改由 `system-prompt/assemble` waterfall 注入，确保当前 DSH system-prompt 组装链实际接收 QQ 场景提示词。
+- **媒体发送复用被动回复兜底**：`qq_send_media` 现在与文本回复共享当前消息锚点、有效期和 `replyPassiveLimit` 预算，锚点不可用时仍自动降级主动发送。
+- **QQ 审批通道优先注册**：`approval/request` answerer 使用 `prepend: true`，避免其它通道先消费审批请求导致 QQ 审批卡片不出现；包元数据同时声明可选的 `@deepseek-ai/dsh-user-approval` peer。
 
 ### 修复
+
+- **会话初始化失败不再静默**：创建/恢复 agent 或投递消息失败时，记录错误并通过当前消息的被动回复锚点向 QQ 返回重试提示。
 
 - **C2C 流式帧严格串行**：此前 `onStreamDelta` 以 fire-and-forget 发送替换帧，且节流时间戳 `lastSentAt` 在请求完成后才更新，导致一帧在途期间到达的每个 delta 都并发再发一帧；QQ 服务端拒绝并发替换帧（`40034021 其它流式消息发送中`、`40054005 消息被去重`），插件随即把流标记失败并整轮降级静态发送。现在帧经单一 drain 循环串行发送，最新 delta 覆盖 pending，最后一帧始终携带最新文本。
 - **DONE 帧等待在途帧并重试**：turn 结束 / 关闭流时先等待在途帧结束后再发 DONE（`input_state=10`）帧，发送失败按 400ms/800ms 退避重试 3 次，避免丢失 DONE 使 QQ 侧流保持"发送中"、下一条流被以 `40034021` 拒绝。

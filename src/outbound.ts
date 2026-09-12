@@ -460,6 +460,7 @@ export class OutboundPipeline {
         req: ApprovalRequestLike,
         next: () => Promise<ApprovalOutcome>,
       ) => Promise<ApprovalOutcome>,
+      options?: { prepend?: boolean },
     ) => () => void
     onApproval('approval/request', async (req, next) => {
       if (req.agent.id !== sessionId) return next()
@@ -500,7 +501,7 @@ export class OutboundPipeline {
         return 'allowed-once'
       }
       return outcome
-    })
+    }, { prepend: true })
   }
 
   private async raceDecision(

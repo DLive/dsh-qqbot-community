@@ -41,7 +41,7 @@ npm install dsh-qqbot-community
 - **审批桥（inline keyboard）**：为每个 QQ 会话注册 agent 作用域 `approval/request` answerer —— 审批请求以三按钮消息送达 QQ（✅ 允许一次 / ⭐ 始终允许 / ❌ 拒绝），按钮回调即决策；"始终允许"按 会话×工具 持久化（`qq-always-allow.json`）。
 - **ask_user_question 转发（`questions`，默认开启）**：agent 调用 `ask_user_question` 时，问题转发到 QQ 对话（否则只出现在 Web UI，QQ 侧会一直"无响应"）。默认以纯文本呈现编号选项，直接回复编号（如 `1,3`）、选项文字或自由文本（多问题按行回答）；`questionButtons: true` 可为 单问题+单选+选项≤5 附加内联键盘按钮（需开通消息按钮权限，沙箱可能不显示，发送失败自动回退纯文本）；无效回答有引导提示且不进入 agent；超时（`questionTimeoutMs`，默认 300s）/turn 取消/会话结束自动收尾。经 agent 作用域 `tools/execute` 拦截实现，不影响 Web UI 的其它会话；`questions: false` 关闭。
 - **QQ API 代理工具**：`qq_api` 工具代理任意 QQ 开放平台 REST 调用（频道/群管理、公告、日程等），自动注入鉴权。
-- **斜杠命令**：`/help` `/ping` `/me` `/new [preset]` `/presets` `/approve ask|never|status` `/always clear`（在投递给 agent 之前拦截，映射 DSH 审批策略；完整列表见下节）。
+- **斜杠命令**：`/help` `/ping`（`/bot-ping`）`/me` `/new [preset]` `/presets` `/compact` `/stop` `/status` `/approve ask|never|status` `/always clear`（在投递给 agent 之前拦截；完整列表见下节）。
 - **定时提醒**：复用 DSH schedule 子系统（web profile 自带 `schedule_create` 等工具）；提醒到期触发同会话 follow-up，回复经出站管线（含主动降级）送达 QQ。
 - **HTTP 推送 API（`httpApi`，默认关闭）**：在 dsh web 的 HTTP 端口上暴露认证端点，外部系统可把文本直接推送到指定 QQ 通道（不经模型）；`record: true` 可同时向会话注入一条不唤醒模型的记录，让 agent 知晓推送内容。详见下文「HTTP 推送 API」。
 
@@ -55,10 +55,13 @@ Webhook transport、热升级（`/bot-upgrade`/update-checker）、`/bot-logs`/`
 | 命令 | 参数 | 说明 |
 |------|------|------|
 | `/help` | — | 在 QQ 内列出全部可用斜杠命令。 |
-| `/ping` | — | 立即返回 `✅ pong（HH:MM:SS）`，用于延迟/可达性自检。 |
+| `/ping`（别名 `/bot-ping`） | — | 返回 QQ→插件总延迟，并拆分网络传输耗时与插件处理耗时；时间戳不可用时回退为 `✅ pong!`。 |
 | `/me` | — | 返回当前会话发送者的 `openid`（可选附带昵称），便于排查白名单。 |
 | `/new` | 可选 `preset id` | 强制关闭当前 thread 上的流式回复（`stream_messages` DONE 帧）并取消进行中的 agent，再为同一会话目标分配下一个 thread id（`#n1`、`#n2` …）；旧 session 保留，仍可在侧边栏切换。携带 preset id 时（如 `/new code`），新会话改用该 preset 组装（先对照 host 的 preset 列表校验，未知/损坏的 id 直接报错并列出可选项，不推进 thread）；不带参数则使用 `agentPreset` 配置值。覆盖按新 session id 持久化（`qq-threads.json`），重启后恢复同一会话仍用同一 preset。 |
 | `/presets` | — | 列出 host 当前提供的全部 agent preset（id、名称、损坏原因），供 `/new <id>` 选择。 |
+| `/compact` | — | 立即压缩当前会话历史（需 host 提供 compaction 服务）。 |
+| `/stop` | — | 关闭当前 C2C 流并中止正在生成的回复。 |
+| `/status` | — | 查看 Session ID、会话类型与可用的持久化信息。 |
 | `/approve` | `ask` \| `never` \| `status`（缺省 `status`） | `ask`/`never` 切换当前会话的审批策略（仅当 `approval: true` 且当前环境提供了 `approval` 服务时生效）；`status` 列出本会话已"始终允许"的工具名。 |
 | `/always` | `clear` | 清空本会话的"始终允许"清单；其它子命令视为未识别并回落到 agent。 |
 
@@ -126,7 +129,7 @@ DSH 的层顺序是：每个 bundle 的 patch → profile 的 `cordis.patch.yml`
     # 以下均可省略，以下为默认值
     allowFrom: ['*']           # C2C 白名单；填 openid 数组限定用户
     groupAllowFrom: ['*']      # 群白名单
-    markdown: false            # msg_type 2，需开通 markdown 权限
+    markdown: true             # msg_type 2；未开通 markdown 权限时设为 false
     typing: true               # C2C 输入中指示
     streaming: true            # C2C 流式回复
     streamThrottleMs: 1200     # 流式帧节流
@@ -137,7 +140,7 @@ DSH 的层顺序是：每个 bundle 的 patch → profile 的 `cordis.patch.yml`
     mediaDownload: true        # 非图片附件落盘 <cwd>/.qq-media/
     approval: true             # QQ 内联键盘审批
     approvalTimeoutMs: 300000  # 审批等待超时
-    slashCommands: true        # /help /ping /me /new /approve /always
+    slashCommands: true        # /help /ping /bot-ping /me /new /compact /stop /status 等
     # stt:                     # 可选：语音转写（OpenAI 兼容）
     #   baseUrl: 'https://api.openai.com/v1'
     #   apiKey: 'sk-...'
@@ -163,6 +166,8 @@ dsh web
 ```
 
 启动后自动：获取 token → 建立 WS 网关（RESUME 恢复）→ 收到消息按会话创建/恢复 agent → 回复经出站管线送回 QQ。
+
+> QQ 内审批卡片依赖 host 组合 `@deepseek-ai/dsh-user-approval` 服务。标准 Web profile 通常已包含；自定义/minimal profile 若未组合该服务，插件会继续运行，但 `/approve` 策略切换与审批卡片不可用。
 
 ## HTTP 推送 API
 

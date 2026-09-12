@@ -14,6 +14,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { LogSink, QQApi } from './qqapi.js'
 import type { RouteStore } from './store.js'
+import { PASSIVE_TTL_MS } from './types.js'
 import type {
   AgentPresetsLike,
   ReplyTarget,
@@ -51,6 +52,8 @@ export interface SetupDeps {
   readonly groupPrompt: string | undefined
   /** Extra system-prompt text for C2C (private) sessions (optional). */
   readonly directPrompt: string | undefined
+  /** Per-inbound-message passive reply budget shared by text and media sends. */
+  readonly replyPassiveLimit: number
 }
 
 /** Built handler compatible with `InboundPipeline.InboundDeps.setupAgent`. */
@@ -60,7 +63,7 @@ export type SetupHandler = (
 ) => void | Promise<void>
 
 export function createSetupAgent(deps: SetupDeps): SetupHandler {
-  const { log, api, routes, outbound, workspaceRegistry, defaultCwd, resolvePreset, agentPresets, questions, groupPrompt, directPrompt } = deps
+  const { log, api, routes, outbound, workspaceRegistry, defaultCwd, resolvePreset, agentPresets, questions, groupPrompt, directPrompt, replyPassiveLimit } = deps
   return async (agentCtx, sessionId) => {
     // 1. Join the agent's preset FIRST so its tools, prompt sections, and
     //    skill catalog are in scope before any QQ-only tool registers.
@@ -90,33 +93,45 @@ export function createSetupAgent(deps: SetupDeps): SetupHandler {
       )
     }
 
-    // 1b. Register a scope-specific extra system-prompt section when configured.
-    //     `groupPrompt` / `directPrompt` are appended after the preset's own prompt
-    //     sections. The host DSH `agent/system-prompt` event carries a mutable
-    //     sections array; listeners push additional entries. This is a best-effort
-    //     injection — if the host version doesn't emit that event the config value
-    //     is silently skipped (no user-visible error).
+    // 1b. Register a scope-specific prompt section on the current DSH
+    //     system-prompt/assemble waterfall. Appending after next() preserves all
+    //     preset/system sections while giving the QQ scope prompt a stable order.
     const scopeKind = sessionId.includes(':c2c:') ? 'c2c' : sessionId.includes(':group:') ? 'group' : undefined
     const extraPrompt = scopeKind === 'group' ? groupPrompt : scopeKind === 'c2c' ? directPrompt : undefined
     if (extraPrompt !== undefined && extraPrompt.length > 0) {
-      try {
-        const onSystemPrompt = agentCtx.on as unknown as (
-          event: 'agent/system-prompt',
-          handler: (sections: Array<{ text: string; weight?: number }>) => void,
-        ) => () => void
-        onSystemPrompt('agent/system-prompt', (sections) => {
-          sections.push({ text: extraPrompt, weight: 100 })
-        })
-        log.info('QQ setupAgent: registered %s scope extra prompt for %s', scopeKind, sessionId)
-      } catch (error) {
-        log.debug?.('QQ setupAgent: system-prompt injection not supported by host: %o', error)
+      type PromptAssembly = {
+        sections?: Array<{ name: string; text: string }>
+        [key: string]: unknown
       }
+      const onSystemPrompt = agentCtx.on as unknown as (
+        event: 'system-prompt/assemble',
+        handler: (
+          assembly: unknown,
+          context: unknown,
+          next: () => Promise<PromptAssembly>,
+        ) => Promise<PromptAssembly>,
+      ) => () => void
+      onSystemPrompt('system-prompt/assemble', async (_assembly, _context, next) => {
+        const assembled = await next()
+        return {
+          ...assembled,
+          sections: [
+            ...(assembled.sections ?? []),
+            { name: 'qqbot-community:scope-prompt', text: extraPrompt },
+          ],
+        }
+      })
+      log.info('QQ setupAgent: registered %s scope extra prompt for %s', scopeKind, sessionId)
     }
 
     // 2. Register the QQ-specific scoped tools and approval answerer.
     const target = (): ReplyTarget =>
       routes.get(sessionId)?.target ?? targetOfSession(sessionId)
-    registerQQTools(agentCtx, sessionId, api, target)
+    const passiveAnchor = (): string | undefined => {
+      const replyTarget = target()
+      return routes.consumePassive(sessionId, PASSIVE_TTL_MS[replyTarget.kind], replyPassiveLimit)
+    }
+    registerQQTools(agentCtx, sessionId, api, target, passiveAnchor)
     outbound.registerApprovalAnswerer(agentCtx, sessionId)
     if (questions !== undefined) registerAskUserInterceptor(agentCtx, sessionId, questions)
     routes.ensure(sessionId, target())

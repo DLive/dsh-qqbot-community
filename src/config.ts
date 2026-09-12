@@ -57,7 +57,7 @@ export const Config = Schema.object({
   questionButtons: Schema.boolean().default(false).description(
     '转发问题时为 单问题+单选+选项≤5 渲染 QQ 内联键盘按钮（需开通消息按钮权限；沙箱环境可能不显示，默认关闭，用编号文字回答）',
   ),
-  slashCommands: Schema.boolean().default(true).description('启用 /help /ping /me /new(/reset/clear) /presets /approve /always /stop /compact /status 命令'),
+  slashCommands: Schema.boolean().default(true).description('启用 /help /ping(/bot-ping) /me /new(/reset/clear) /presets /approve /always /stop /compact /status 命令'),
   httpApi: Schema.object({
     enable: Schema.boolean().default(false).description('在 dsh web 的 HTTP 服务上挂载外部推送 API（POST <path>/send、GET <path>/channels）'),
     token: Schema.string().description('Bearer 认证 token；enable 时必填（至少 8 个字符），所有请求都须携带 Authorization: Bearer <token>'),

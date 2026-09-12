@@ -119,6 +119,7 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
 
 /** Normalize one gateway op-0 payload into an IncomingMessage. */
 export function normalizeMessage(payload: unknown, eventType: string): IncomingMessage | undefined {
+  const receivedAt = Date.now()
   const data = asRecord(payload)
   if (data === undefined || typeof data.id !== 'string') return undefined
   const author = asRecord(data.author)
@@ -180,6 +181,7 @@ export function normalizeMessage(payload: unknown, eventType: string): IncomingM
       senderId: author.user_openid,
       senderName: undefined,
       timestamp: typeof data.timestamp === 'string' ? data.timestamp : '',
+      receivedAt,
       msgIdx,
       refMsgIdx,
       msgType: typeof data.message_type === 'number' ? data.message_type : undefined,
@@ -201,6 +203,7 @@ export function normalizeMessage(payload: unknown, eventType: string): IncomingM
       senderId: author.member_openid,
       senderName: typeof author.username === 'string' ? author.username : undefined,
       timestamp: typeof data.timestamp === 'string' ? data.timestamp : '',
+      receivedAt,
       msgIdx,
       refMsgIdx,
       msgType: typeof data.message_type === 'number' ? data.message_type : undefined,
@@ -224,6 +227,7 @@ export function normalizeMessage(payload: unknown, eventType: string): IncomingM
       senderId: author.id,
       senderName: typeof author.username === 'string' ? author.username : undefined,
       timestamp: typeof data.timestamp === 'string' ? data.timestamp : '',
+      receivedAt,
       msgIdx,
       refMsgIdx,
       msgType: undefined,
@@ -539,22 +543,30 @@ export class InboundPipeline {
       return
     }
 
-    const agent = await this.ensureAgent(sessionId)
-    if (!agent) {
-      this.deps.log.error('QQ inbound: ensureAgent returned no agent for %s', sessionId)
+    try {
+      const agent = await this.ensureAgent(sessionId)
+      if (!agent) throw new Error(`ensureAgent returned no agent for ${sessionId}`)
+      this.deps.log.info('QQ inbound: agent.send %s (target session=%s)', message.id, sessionId)
+      agent.send({
+        id: message.id,
+        role: 'user',
+        content: [
+          ...(text.length > 0 ? [{ type: 'text', text }] : []),
+          ...imageBlocks,
+        ],
+        source: { kind: 'user', id: message.senderId, name: message.senderName ?? message.senderId },
+      }, 'next-turn', true)
+    } catch (error) {
+      this.deps.log.error('QQ inbound: failed to create/deliver session %s: %o', sessionId, error)
       this.stopTyping(sessionId)
-      return
+      await this.deps.api.sendText(
+        message.reply,
+        '⚠️ 处理消息时出现异常，请稍后重试。',
+        message.id,
+      ).catch((sendError: unknown) => {
+        this.deps.log.error('QQ inbound: failed to send session error reply: %o', sendError)
+      })
     }
-    this.deps.log.info('QQ inbound: agent.send %s (target session=%s)', message.id, sessionId)
-    agent.send({
-      id: message.id,
-      role: 'user',
-      content: [
-        ...(text.length > 0 ? [{ type: 'text', text }] : []),
-        ...imageBlocks,
-      ],
-      source: { kind: 'user', id: message.senderId, name: message.senderName ?? message.senderId },
-    }, 'next-turn', true)
   }
 
   private dedupe(messageId: string): boolean {

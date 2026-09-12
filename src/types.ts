@@ -174,6 +174,8 @@ export interface IncomingMessage {
   readonly senderId: string
   readonly senderName?: string
   readonly timestamp: string
+  /** Local arrival time, used to split QQ transport latency from plugin processing. */
+  readonly receivedAt?: number
   /** Message index used for quote resolution (`msg_idx`), when present. */
   readonly msgIdx?: string
   /** Index of the quoted message (`ref_msg_idx`), when replying. */

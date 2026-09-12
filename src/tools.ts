@@ -32,6 +32,7 @@ export function registerQQTools(
   sessionId: string,
   api: QQApi,
   routeTarget: () => ReplyTarget | undefined,
+  passiveAnchor?: () => string | undefined,
 ): void {
   const tools = (agentCtx as unknown as { tools?: ToolRegistryService }).tools
   if (tools === undefined) return
@@ -78,7 +79,10 @@ export function registerQQTools(
       const input = args as { source: string; kind?: MediaKind; text?: string }
       const kind = input.kind ?? inferMediaKind(input.source)
       try {
-        await api.sendMedia(target(), kind, input.source, { text: input.text })
+        await api.sendMedia(target(), kind, input.source, {
+          text: input.text,
+          passiveMsgId: passiveAnchor?.(),
+        })
         return { sent: true, kind }
       } catch (error) {
         return { sent: false, kind, error: error instanceof Error ? error.message : String(error) }

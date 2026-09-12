@@ -158,6 +158,7 @@ export function apply(ctx: Context, config: Config): void {
     questions,
     groupPrompt: config.groupPrompt,
     directPrompt: config.directPrompt,
+    replyPassiveLimit: config.replyPassiveLimit ?? 4,
   })
   // The two callbacks above close over the same pipelines that depend on
   // them; attach them after construction so the cycle resolves cleanly.
