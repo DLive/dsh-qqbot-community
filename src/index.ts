@@ -16,6 +16,7 @@ import {
   type ApprovalServiceLike,
   type AttachmentStoreService,
   type CompactionService,
+  type LlmCatalogServiceLike,
   type SessionPersistenceService,
   type WebServerService,
   type WorkspaceRegistryService,
@@ -57,6 +58,7 @@ function resolveOptionalServices(ctx: Context, log: ReturnType<typeof createLogS
   agentPresets: AgentPresetsLike | undefined
   webServer: WebServerService | undefined
   compaction: CompactionService | undefined
+  llm: LlmCatalogServiceLike | undefined
 } {
   const get = ctx.get as (name: string, strict?: boolean) => unknown
   const attachments = get('attachments', false) as AttachmentStoreService | undefined
@@ -64,6 +66,7 @@ function resolveOptionalServices(ctx: Context, log: ReturnType<typeof createLogS
   const agentPresets = get('agentPresets', false) as AgentPresetsLike | undefined
   const webServer = get('webServer', false) as WebServerService | undefined
   const compaction = get('compaction', false) as CompactionService | undefined
+  const llm = get('llm', false) as LlmCatalogServiceLike | undefined
   if (attachments === undefined && log.debug !== undefined) {
     log.debug('attachments service not present; image attachments will fall back to text paths')
   }
@@ -73,7 +76,10 @@ function resolveOptionalServices(ctx: Context, log: ReturnType<typeof createLogS
   if (agentPresets === undefined && log.debug !== undefined) {
     log.debug('agentPresets service not present; QQ agents will run on the empty global layer')
   }
-  return { attachments, approval, agentPresets, webServer, compaction }
+  if (llm === undefined && log.debug !== undefined) {
+    log.debug('llm service not present; /model will not list the provider catalog')
+  }
+  return { attachments, approval, agentPresets, webServer, compaction, llm }
 }
 
 /** Strict, narrow validator for QQ INTERACTION_CREATE payloads. */
@@ -101,7 +107,7 @@ export function apply(ctx: Context, config: Config): void {
   const agents = (ctx as unknown as { agents: AgentRegistryService }).agents
   const sessionPersistence = (ctx as unknown as { sessionPersistence?: SessionPersistenceService }).sessionPersistence
   const workspaceRegistry = (ctx as unknown as { workspaceRegistry?: WorkspaceRegistryService }).workspaceRegistry
-  const { attachments, approval, agentPresets, webServer, compaction } = resolveOptionalServices(ctx, log)
+  const { attachments, approval, agentPresets, webServer, compaction, llm } = resolveOptionalServices(ctx, log)
 
   const api = new QQApi(config, log)
   const refIndex = new RefIndexStore(join(storages, 'qq-refindex.jsonl'))
@@ -133,7 +139,7 @@ export function apply(ctx: Context, config: Config): void {
   questions?.attachHooks({ onPresent: (sessionId: string) => outbound.flushText(sessionId) })
 
   // Now that outbound exists, build the handlers that close over it.
-  const onSlashCommand = createSlashHandler({ log, alwaysAllow, threads, agents, approval, outbound, agentPresets, compaction, sessionPersistence })
+  const onSlashCommand = createSlashHandler({ log, alwaysAllow, threads, agents, approval, outbound, agentPresets, compaction, sessionPersistence, config, llm })
   // `config.agentPreset` carries schemastery's `.default('standard')`, so it
   // is always a non-empty string at runtime; we still defensively fall back
   // to 'standard' for any empty override written by hand.
