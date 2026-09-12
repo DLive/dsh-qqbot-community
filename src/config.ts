@@ -10,7 +10,7 @@ export const DEFAULT_INTENTS = (1 << 30) + (1 << 25) + (1 << 26) + (1 << 12)
 
 export interface Config extends ConfigType {}
 
-export const Config = Schema.object({
+export const Config: Schema<Config> = Schema.object({
   id: Schema.string().required().description('QQ 机器人 AppID'),
   secret: Schema.string().required().description('QQ 机器人 AppSecret'),
   sandbox: Schema.boolean().default(true).description('是否使用 QQ 沙箱环境'),
@@ -18,6 +18,11 @@ export const Config = Schema.object({
   intents: Schema.number().default(DEFAULT_INTENTS).description('网关事件订阅掩码'),
   provider: Schema.string().default('DeepSeek').description('新建 QQ 会话默认 AI 提供方'),
   model: Schema.string().default('DeepSeek-V4-Flash').description('新建 QQ 会话默认模型'),
+  modelAliases: Schema.dict(Schema.string()).description(
+    '/model 命令的模型别名表：短名 → "provider" 或 "provider/model"。'
+    + '例如 { zai: "zai-coding-cn/glm-5.2", mmx: "minimax-cn/MiniMax-M3" }，'
+    + '之后 /model zai 即可切换。未命中别名的参数按 <provider>[/<model>] 原样解析。',
+  ),
   cwd: Schema.string().description('新建 QQ 会话的绝对工作目录'),
   agentPreset: Schema.string().default('standard').description(
     'QQ 会话使用的默认 agent preset id（决定工具、提示词、技能）。'

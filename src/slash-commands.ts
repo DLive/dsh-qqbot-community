@@ -1,7 +1,7 @@
 /**
  * Slash commands answered directly by the adapter (never reach the agent):
- *   /help /ping(/bot-ping) /me /new(/reset/clear) [preset] /presets /approve /always
- *   /stop /compact /status
+ *   /help /ping(/bot-ping) /me /new(/reset/clear) [preset] /presets /model
+ *   /approve /always /stop /compact /status
  *
  * Returns `true` if the command was handled (so the inbound pipeline skips
  * agent delivery), `false` to fall through. The factory pattern lets us
@@ -15,7 +15,9 @@ import type {
   AgentPresetsLike,
   ApprovalServiceLike,
   CompactionService,
+  Config,
   IncomingMessage,
+  LlmCatalogServiceLike,
   SessionPersistenceService,
 } from './types.js'
 import type { LogSink } from './qqapi.js'
@@ -31,12 +33,16 @@ export interface SlashDeps {
   readonly agents: AgentRegistryService
   readonly approval: ApprovalServiceLike | undefined
   readonly outbound: OutboundPipeline
+  /** Plugin config (used by `/model` to echo the config default). */
+  readonly config: Config
   /** Present when the host runs the agent-presets service; enables /new <preset> and /presets. */
   readonly agentPresets: AgentPresetsLike | undefined
   /** Present when the host runs the compaction service; enables /compact. */
   readonly compaction: CompactionService | undefined
   /** Present when the host runs the session persistence service; enables /status. */
   readonly sessionPersistence: SessionPersistenceService | undefined
+  /** Present when the host runs the llm service; lets /model list the provider catalog. */
+  readonly llm: LlmCatalogServiceLike | undefined
 }
 
 /** Built handler compatible with `InboundPipeline.InboundDeps.onSlashCommand`. */
@@ -48,7 +54,7 @@ export type SlashHandler = (
 ) => Promise<boolean>
 
 export function createSlashHandler(deps: SlashDeps): SlashHandler {
-  const { log, alwaysAllow, threads, agents, approval, outbound, agentPresets, compaction, sessionPersistence } = deps
+  const { log, alwaysAllow, threads, agents, approval, outbound, agentPresets, compaction, sessionPersistence, config, llm } = deps
   /** List presets through the host service; `undefined` when unavailable/failed. */
   const listPresets = async (): Promise<readonly AgentPresetRowLike[] | undefined> => {
     if (agentPresets === undefined) return undefined
@@ -70,6 +76,7 @@ export function createSlashHandler(deps: SlashDeps): SlashHandler {
           '/me — 显示你的 openid',
           '/new [preset]（别名 /reset /clear）— 开启新会话（可选 preset id，见 /presets）',
           '/presets — 列出可用的 agent preset',
+          '/model [<provider>[/<model>]|reset] — 切换当前线程的 AI 模型（已有会话时自动开新会话）',
           '/compact — 压缩会话历史（摘要替换旧记录，保留上下文）',
           '/stop — 中止当前正在生成的回复',
           '/status — 查看当前会话状态',
@@ -170,6 +177,120 @@ export function createSlashHandler(deps: SlashDeps): SlashHandler {
         await reply(presetId === undefined
           ? `✅ 已开启新会话（#n${thread}）。下次发送的消息将进入 \`${newId}\`。旧的对话仍保留，可手动在侧边栏切换。`
           : `✅ 已开启新会话（#n${thread}，preset=${presetId}）。下次发送的消息将进入 \`${newId}\`。旧的对话仍保留，可手动在侧边栏切换。`)
+        return true
+      }
+      case 'model': {
+        // `/model` (no arg) reports the current thread's override, the provider
+        // catalog (when the host llm service is present), the configured
+        // aliases, and the usage.
+        // `/model reset` clears the override (back to plugin-config default).
+        // `/model <provider>` selects the provider; its default model applies.
+        // `/model <provider>/<model>` selects both; the slash is required when
+        // a model name is given, but the provider itself may contain slashes
+        // (e.g. `MiniMax/coding-CN`). The first `/` is the separator.
+        const key = targetKey(message.reply)
+        const currentThread = threads.current(key)
+        const baseId = baseSessionId(message.reply)
+        const currentSessionId = currentThread === 0 ? baseId : `${baseId}#n${currentThread}`
+        const existing = threads.modelFor(currentSessionId)
+        const arg = rest[0]
+        if (arg === undefined || arg === '') {
+          const defaultLabel = `\`${config.provider ?? 'DeepSeek'}/${config.model ?? 'DeepSeek-V4-Flash'}\``
+          const lines: string[] = [
+            existing === undefined
+              ? `当前线程无 model 覆盖，使用 plugin-config 默认：${defaultLabel}`
+              : `当前线程 model：\`${existing.provider}${existing.model !== undefined ? '/' + existing.model : ''}\``,
+          ]
+          if (llm !== undefined) {
+            try {
+              const providers = llm.listProviders()
+              for (const provider of providers) {
+                const models = await llm.listModels(provider.id).catch(() => [])
+                const modelList = models.map(model => model.id).join('、')
+                lines.push(`- ${provider.id}：${modelList.length > 0 ? modelList : '（未公布模型）'}`)
+              }
+            } catch (error) {
+              log.warn('QQ /model: listing provider catalog failed: %o', error)
+            }
+          }
+          const aliases = config.modelAliases ?? {}
+          const aliasEntries = Object.entries(aliases)
+          if (aliasEntries.length > 0) {
+            lines.push(`别名：${aliasEntries.map(([short, target]) => `${short}→${target}`).join('，')}`)
+          }
+          lines.push('用法：/model <provider>[/<model>] 或别名；/model reset 恢复默认')
+          await reply(lines.join('\n'))
+          return true
+        }
+        if (arg === 'reset' || arg === 'clear') {
+          threads.setModel(currentSessionId, undefined)
+          log.info('QQ /model reset: target=%s thread=%d sessionId=%s', key, currentThread, currentSessionId)
+          await reply(`✅ 已清除 model 覆盖，下次消息回到 plugin-config 默认 \`${config.provider ?? 'DeepSeek'}/${config.model ?? 'DeepSeek-V4-Flash'}\``)
+          return true
+        }
+        // Resolve alias first (config.modelAliases: short name → "provider[/model]"),
+        // then parse "<provider>[/<model>]" with the first `/` as separator.
+        const aliases = config.modelAliases ?? {}
+        const resolved = typeof aliases[arg] === 'string' && aliases[arg].length > 0 ? aliases[arg] : arg
+        const sep = resolved.indexOf('/')
+        const provider = sep < 0 ? resolved : resolved.slice(0, sep)
+        const model = sep < 0 ? undefined : resolved.slice(sep + 1)
+        if (provider.length === 0) {
+          await reply('⚠️ provider 不能为空（用法：`/model <provider>[/<model>]`）')
+          return true
+        }
+        if (model !== undefined && model.length === 0) {
+          await reply('⚠️ / 后面需要 model 名（用法：`/model <provider>/<model>`，或省略只写 provider）')
+          return true
+        }
+        const override = model === undefined ? { provider } : { provider, model }
+        // Validate against the live llm catalog when the host service exists:
+        // an unknown provider can never route (hard failure later), while an
+        // unknown model may still pass through on advisory-catalog adapters,
+        // so it is accepted with a warning naming the available ids.
+        let warning: string | undefined
+        if (llm !== undefined) {
+          const providers = llm.listProviders()
+          if (!providers.some(entry => entry.id === provider)) {
+            const ids = providers.map(entry => entry.id).join('、')
+            await reply(`⚠️ 未知的 provider "${provider}"。当前可用：${ids}\n（可用 /model 查看完整清单）`)
+            return true
+          }
+          if (model !== undefined) {
+            const models = await llm.listModels(provider).catch(() => [])
+            const ids = models.map(entry => entry.id)
+            if (ids.length > 0 && !ids.includes(model)) {
+              warning = `⚠️ 注意：模型 "${model}" 不在 ${provider} 当前清单中（${ids.join('、')}），严格校验的路由会请求失败`
+            }
+          }
+        }
+        // If the current thread already has a live agent, its model is fixed
+        // (persisted in the session header), so switching requires a fresh
+        // session: bump the thread exactly like `/new` does (cancel the old
+        // agent, close any in-flight stream), carry over the preset override,
+        // and record the model override on the NEW session id. When no agent
+        // exists yet, the override lands on the current id directly and the
+        // next inbound message composes with it.
+        let targetSessionId = currentSessionId
+        let threadNo = currentThread
+        const oldAgent: AgentLike | undefined = agents.get(currentSessionId)
+        if (oldAgent !== undefined) {
+          await outbound.closeStream(currentSessionId).catch(() => undefined)
+          try {
+            oldAgent.cancel({ kind: 'user' })
+          } catch (error) {
+            log.warn('failed to cancel old QQ agent on /model: %o', error)
+          }
+          threadNo = threads.next(key)
+          targetSessionId = threadNo === 0 ? baseId : `${baseId}#n${threadNo}`
+          threads.setPreset(targetSessionId, threads.presetFor(currentSessionId))
+        }
+        threads.setModel(targetSessionId, override)
+        log.info('QQ /model: target=%s thread=%d sessionId=%s override=%o', key, threadNo, targetSessionId, override)
+        await reply([
+          `✅ model 已切到 \`${provider}${model !== undefined ? '/' + model : ''}\`${oldAgent !== undefined ? `（已自动开启新会话 #n${threadNo}，preset 沿用）` : ''}，下一条消息即用新模型`,
+          ...(warning !== undefined ? [warning] : []),
+        ].join('\n'))
         return true
       }
       case 'stop': {

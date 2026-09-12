@@ -8,6 +8,7 @@
 ### 新增
 
 - **`/ping` 网络延迟分解**：同步上游 `/bot-ping` 能力，保留 `/ping` 并新增 `/bot-ping` 别名；返回 QQ→插件总延迟、网络传输耗时和插件处理耗时。
+- **`/model` 按会话切换 AI 模型**：QQ 内 `/model <provider>[/<model>]`（或 `reset`）切换当前线程的 provider/model。会话的模型在创建时固定，因此切换已存在的会话时自动按 `/new` 语义取消旧 agent 并开启新 thread（preset 覆盖沿用）；无活跃会话时覆盖直接作用于当前 id。覆盖持久化于 `qq-threads.json`（存储格式升到 v3，v2/v1 自动迁移）。host 提供 `llm` 服务时，`/model` 无参数动态列出全部 provider 及其模型清单（`ctx.llm.listProviders()` / `listModels()`，不做路由白名单）；未知 provider 直接拒绝并列出可选项，未知模型予以接受但附警告（catalog 为建议性，部分适配器允许未列出 id 透传）。新增可选配置 `modelAliases`（短名 → `"provider"` 或 `"provider/model"`），使命令在多 provider 部署下不必敲全名。
 
 ### 变更
 

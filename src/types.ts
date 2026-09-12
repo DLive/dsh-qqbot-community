@@ -36,6 +36,8 @@ export interface Config {
   intents?: number
   provider?: string
   model?: string
+  /** `/model` shorthand aliases: short name → "provider" or "provider/model". */
+  modelAliases?: Record<string, string>
   cwd?: string
   /**
    * Agent preset id used when this plugin creates/resumes a session.
@@ -355,6 +357,14 @@ export interface AgentPresetsLike {
   resolve(id?: string): Promise<{ readonly id: string }>
   /** Every preset the configured roots currently supply (first-root-wins per id). */
   list(): Promise<readonly AgentPresetRowLike[]>
+}
+
+/** Structural slice of the host `llm` service the `/model` command reads for its catalog. */
+export interface LlmCatalogServiceLike {
+  /** Every registered provider route, in registration order. */
+  listProviders(): readonly { readonly id: string; readonly name?: string }[]
+  /** The models one registered route currently advertises. */
+  listModels(provider: string): Promise<readonly { readonly id: string; readonly name?: string }[]>
 }
 
 export interface ToolRegistryService {
