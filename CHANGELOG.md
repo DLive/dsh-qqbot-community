@@ -7,6 +7,7 @@
 
 ### 新增
 
+- **会话列表显示标题**：`/sessions` 与 `/sessions all` 每行显示会话标题——优先取会话日志中最新的 `session/title` 事件（web 会话由标题服务写入），无标题记录时回退首条用户消息摘录（QQ 会话通常无标题事件），单行截断 40 字。
 - **接管非 QQ（web 创建）会话**：`/sessions all` 列出最近 3 天的非 `qq:` 前缀持久化会话（web UI 等入口创建，最多 20 个，带序号、创建时间、事件数、preset、cwd）；`/switch pick <序号>`（列表 5 分钟内有效）或 `/switch id <完整会话id>` 把当前目标接管（pin）到该会话——下一条 QQ 消息进入其历史上下文，沿用该会话的 cwd/preset/模型，Web 侧同时使用则共享上下文。`ThreadStore` 存储格式升到 v4（新增 per-target `pinned` 指针，v3 及更早自动迁移）；入站与 HTTP 推送 API 统一经 `resolveCurrentSessionId` 解析（pin 优先于线程计数器）；`/new` 与任意线程切换自动解除接管；其它 QQ 目标的会话与未持久化 id 被拒绝；同样受 `switchAllowFrom` 控制。
 - **会话列表与切换**：新增 `/sessions`（别名 `/threads`）与 `/switch`（别名 `/sw`）斜杠命令。`/sessions` 通过 host `sessionPersistence.list()` 枚举当前会话目标（C2C 用户 / 群 / 频道）最近 3 天创建的持久化会话（线程编号、创建时间、事件数、preset、当前标记）；`/switch <n|#nN|main>` 把线程指针切换到指定历史会话，下一条消息在其历史上下文中继续。切换与 `/new` 共用收尾路径（取消离开线程上的 agent、关闭其 C2C 流），`ThreadStore` 新增 `set()` 支持指针回拨并持久化于 `qq-threads.json`；未来线程（编号超过当前最高值）被拒绝。
 - **切换权限 `switchAllowFrom`**：`/sessions` 与 `/switch` 受可选配置 `switchAllowFrom` 控制——按发送者 openid 匹配（群聊即成员 openid），`'*'` 通配 / 留空放行 / `'disabled'` 全拒，缺省放行。群聊中线程为全体成员共享，切换影响整个群的上下文，建议群场景显式配置。

@@ -86,7 +86,7 @@ export function createSlashHandler(deps: SlashDeps): SlashHandler {
    * `undefined` when the host persistence service cannot list; each entry
    * carries the resolved thread number (0 = bare base session id).
    */
-  const listTargetSessions = async (target: ReplyTarget): Promise<readonly { thread: number; createdAt: number; eventCount?: number; preset?: string }[] | undefined> => {
+  const listTargetSessions = async (target: ReplyTarget): Promise<readonly { id: string; thread: number; createdAt: number; eventCount?: number; preset?: string }[] | undefined> => {
     if (sessionPersistence?.list === undefined) return undefined
     try {
       const base = baseSessionId(target)
@@ -98,7 +98,7 @@ export function createSlashHandler(deps: SlashDeps): SlashHandler {
           const id = snap.header.id
           const suffix = id === base ? '' : id.slice(prefix.length)
           const thread = suffix.match(/^\d+$/) !== null ? Number(suffix) : -1
-          return { thread, createdAt: snap.header.createdAt, eventCount: snap.eventCount, preset: snap.header.agentPreset }
+          return { id, thread, createdAt: snap.header.createdAt, eventCount: snap.eventCount, preset: snap.header.agentPreset }
         })
         .filter(entry => entry.thread >= 0)
         .sort((a, b) => b.thread - a.thread)
@@ -142,6 +142,46 @@ export function createSlashHandler(deps: SlashDeps): SlashHandler {
       return snapshots.some(snap => snap.header.id === sessionId)
     } catch {
       return true // verification unavailable — do not block the operator
+    }
+  }
+  /**
+   * Best-effort display title for one persisted session: the latest
+   * `session/title` log event when present (web sessions get LLM/user
+   * titles), else an excerpt of the first user message (QQ sessions, which
+   * the web title pipeline never titles). Capped to one short line.
+   */
+  const sessionTitle = async (sessionId: string): Promise<string | undefined> => {
+    if (sessionPersistence === undefined) return undefined
+    try {
+      const inspected = await sessionPersistence.inspect(sessionId)
+      const events = Array.isArray(inspected.events) ? inspected.events : []
+      let titled: string | undefined
+      let excerpt: string | undefined
+      for (const event of events) {
+        const entry = event as { type?: string; data?: { title?: unknown; content?: unknown } }
+        if (entry.type === 'session/title') {
+          const title = entry.data?.title
+          if (typeof title === 'string' && title.trim().length > 0) titled = title.trim()
+        }
+        if (excerpt === undefined && entry.type === 'user/message') {
+          const content = entry.data?.content
+          if (typeof content === 'string' && content.trim().length > 0) {
+            excerpt = content
+          } else if (Array.isArray(content)) {
+            const text = content
+              .map(block => (block !== null && typeof block === 'object' && typeof (block as { text?: unknown }).text === 'string' ? (block as { text: string }).text : ''))
+              .join('')
+              .trim()
+            if (text.length > 0) excerpt = text
+          }
+        }
+      }
+      const raw = titled ?? excerpt
+      if (raw === undefined) return undefined
+      const oneLine = raw.replace(/\s+/g, ' ').trim()
+      return oneLine.length > 40 ? `${oneLine.slice(0, 40)}…` : oneLine
+    } catch {
+      return undefined // not persisted yet or inspection failed — no title line
     }
   }
   return async (sessionId, message, text, reply) => {
@@ -231,16 +271,18 @@ export function createSlashHandler(deps: SlashDeps): SlashHandler {
           allListings.set(key, { ids: recent.map(entry => entry.id), expires: Date.now() + ALL_LISTING_TTL_MS })
           const pinnedNow = threads.pinnedSession(key)
           const lines: string[] = [`🗂 最近 3 天的其它会话（非 QQ，共 ${recent.length} 个）：`]
-          recent.forEach((entry, index) => {
+          for (const [index, entry] of recent.entries()) {
             const when = new Date(entry.createdAt).toLocaleString()
+            const title = await sessionTitle(entry.id)
             lines.push([
-              `- [${index + 1}]${entry.id === pinnedNow ? ' ← 当前接管' : ''}`,
+              `- [${index}]${entry.id === pinnedNow ? ' ← 当前接管' : ''}`,
+              title !== undefined ? `“${title}”` : '',
               `· 创建于 ${when}`,
               entry.eventCount !== undefined ? `· ${entry.eventCount} 条事件` : '',
               entry.preset !== undefined && entry.preset.length > 0 ? `· preset=${entry.preset}` : '',
               entry.cwd !== undefined && entry.cwd.length > 0 ? `· cwd=${entry.cwd}` : '',
             ].filter(part => part.length > 0).join(' '))
-          })
+          }
           lines.push(`用 /switch pick <序号> 接管所选会话（列表 ${ALL_LISTING_TTL_MS / 60000} 分钟内有效）；/switch id <完整会话id> 亦可直选`)
           await reply(lines.join('\n'))
           return true
@@ -264,8 +306,10 @@ export function createSlashHandler(deps: SlashDeps): SlashHandler {
         for (const entry of recent) {
           const label = entry.thread === 0 ? '#0（主会话）' : `#n${entry.thread}`
           const when = new Date(entry.createdAt).toLocaleString()
+          const title = await sessionTitle(entry.id)
           lines.push([
             `- ${label}${pinned === undefined && entry.thread === currentThread ? ' ← 当前' : ''}`,
+            title !== undefined ? `“${title}”` : '',
             `· 创建于 ${when}`,
             entry.eventCount !== undefined ? `· ${entry.eventCount} 条事件` : '',
             entry.preset !== undefined && entry.preset.length > 0 ? `· preset=${entry.preset}` : '',
