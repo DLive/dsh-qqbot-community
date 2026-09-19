@@ -28,26 +28,28 @@ export interface ModelOverride {
   readonly model?: string
 }
 
-/** On-disk shape (v3): thread counters + per-session preset + per-session model overrides. */
+/** On-disk shape (v4): thread counters + preset + model overrides + pinned foreign session ids. */
 interface ThreadPayload {
   counters: Record<string, number>
   presets: Record<string, string>
   models: Record<string, ModelOverride>
+  /** Per-target takeover: an arbitrary (e.g. web-created) session id the next inbound resolves to. */
+  pinned: Record<string, string>
 }
 
 /** Accept both the v2 object shape and the legacy bare counter map. */
 function normalizePayload(raw: unknown): ThreadPayload {
-  const empty: ThreadPayload = { counters: {}, presets: {}, models: {} }
+  const empty: ThreadPayload = { counters: {}, presets: {}, models: {}, pinned: {} }
   if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return empty
   const record = raw as Record<string, unknown>
   if (!('counters' in record) && !('presets' in record) && !('models' in record)) {
     // Legacy file: Record<targetKey, number>. Migrate in memory; the next
-    // flush persists the v3 shape.
+    // flush persists the v4 shape.
     const counters: Record<string, number> = {}
     for (const [key, value] of Object.entries(record)) {
       if (typeof value === 'number') counters[key] = value
     }
-    return { counters, presets: {}, models: {} }
+    return { counters, presets: {}, models: {}, pinned: {} }
   }
   const counters: Record<string, number> = {}
   const rawCounters = record.counters
@@ -77,7 +79,14 @@ function normalizePayload(raw: unknown): ThreadPayload {
         : (typeof model === 'string' && model.length > 0 ? { provider, model } : { provider })
     }
   }
-  return { counters, presets, models }
+  const pinned: Record<string, string> = {}
+  const rawPinned = record.pinned
+  if (rawPinned !== null && typeof rawPinned === 'object' && !Array.isArray(rawPinned)) {
+    for (const [key, value] of Object.entries(rawPinned as Record<string, unknown>)) {
+      if (typeof value === 'string' && value.length > 0) pinned[key] = value
+    }
+  }
+  return { counters, presets, models, pinned }
 }
 
 async function readJson(file: string): Promise<unknown> {
@@ -103,7 +112,7 @@ export function targetKey(target: { kind: 'c2c'; userId: string } | { kind: 'gro
 }
 
 export class ThreadStore {
-  private payload: ThreadPayload = { counters: {}, presets: {}, models: {} }
+  private payload: ThreadPayload = { counters: {}, presets: {}, models: {}, pinned: {} }
   private writing: Promise<void> = Promise.resolve()
 
   constructor(private readonly file: string) {}
@@ -117,12 +126,54 @@ export class ThreadStore {
     return this.payload.counters[key] ?? 0
   }
 
-  /** Atomically increment and return the new thread number. */
+  /**
+   * Atomically increment and return the new thread number.
+   */
   next(key: string): number {
     const next = (this.payload.counters[key] ?? 0) + 1
     this.payload.counters[key] = next
+    // `/new` returns the target to thread mode.
+    delete this.payload.pinned[key]
     this.flush()
     return next
+  }
+
+  /**
+   * Point the current-thread counter at an existing thread number (used by
+   * `/switch <n>`): the next inbound message for that target resolves to
+   * `#n<value>` instead of the highest thread. Thread 0 deletes the entry so
+   * the target falls back to the bare base session id. Values are clamped to
+   * `>= 0`; callers validate the upper bound (a future thread has no session).
+   */
+  set(key: string, value: number): void {
+    if (!Number.isSafeInteger(value) || value < 0) return
+    if (value === 0) delete this.payload.counters[key]
+    else this.payload.counters[key] = value
+    // Any thread switch drops a pinned takeover (`/switch <n>` is thread mode).
+    delete this.payload.pinned[key]
+    this.flush()
+  }
+
+  /**
+   * The arbitrary (e.g. web-created) session id this target is currently
+   * taken over by (`/switch id <sessionId>` / `/switch pick <k>`), or
+   * `undefined` when the target resolves through its thread counter.
+   */
+  pinnedSession(key: string): string | undefined {
+    return this.payload.pinned[key]
+  }
+
+  /** Pin (take over) an arbitrary persisted session id for this target. */
+  pin(key: string, sessionId: string): void {
+    this.payload.pinned[key] = sessionId
+    this.flush()
+  }
+
+  /** Drop the takeover pin; the target returns to thread-counter resolution. */
+  unpin(key: string): void {
+    if (this.payload.pinned[key] === undefined) return
+    delete this.payload.pinned[key]
+    this.flush()
   }
 
   /**

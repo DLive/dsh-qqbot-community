@@ -41,7 +41,7 @@ npm install dsh-qqbot-community
 - **审批桥（inline keyboard）**：为每个 QQ 会话注册 agent 作用域 `approval/request` answerer —— 审批请求以三按钮消息送达 QQ（✅ 允许一次 / ⭐ 始终允许 / ❌ 拒绝），按钮回调即决策；"始终允许"按 会话×工具 持久化（`qq-always-allow.json`）。
 - **ask_user_question 转发（`questions`，默认开启）**：agent 调用 `ask_user_question` 时，问题转发到 QQ 对话（否则只出现在 Web UI，QQ 侧会一直"无响应"）。默认以纯文本呈现编号选项，直接回复编号（如 `1,3`）、选项文字或自由文本（多问题按行回答）；`questionButtons: true` 可为 单问题+单选+选项≤5 附加内联键盘按钮（需开通消息按钮权限，沙箱可能不显示，发送失败自动回退纯文本）；无效回答有引导提示且不进入 agent；超时（`questionTimeoutMs`，默认 300s）/turn 取消/会话结束自动收尾。经 agent 作用域 `tools/execute` 拦截实现，不影响 Web UI 的其它会话；`questions: false` 关闭。
 - **QQ API 代理工具**：`qq_api` 工具代理任意 QQ 开放平台 REST 调用（频道/群管理、公告、日程等），自动注入鉴权。
-- **斜杠命令**：`/help` `/ping`（`/bot-ping`）`/me` `/new [preset]` `/presets` `/model [<provider>[/<model>]]` `/compact` `/stop` `/status` `/approve ask|never|status` `/always clear`（在投递给 agent 之前拦截；完整列表见下节）。
+- **斜杠命令**：`/help` `/ping`（`/bot-ping`）`/me` `/new [preset]` `/presets` `/sessions` `/switch <n|#nN|main>` `/model [<provider>[/<model>]]` `/compact` `/stop` `/status` `/approve ask|never|status` `/always clear`（在投递给 agent 之前拦截；完整列表见下节）。
 - **定时提醒**：复用 DSH schedule 子系统（web profile 自带 `schedule_create` 等工具）；提醒到期触发同会话 follow-up，回复经出站管线（含主动降级）送达 QQ。
 - **HTTP 推送 API（`httpApi`，默认关闭）**：在 dsh web 的 HTTP 端口上暴露认证端点，外部系统可把文本直接推送到指定 QQ 通道（不经模型）；`record: true` 可同时向会话注入一条不唤醒模型的记录，让 agent 知晓推送内容。详见下文「HTTP 推送 API」。
 
@@ -59,6 +59,8 @@ Webhook transport、热升级（`/bot-upgrade`/update-checker）、`/bot-logs`/`
 | `/me` | — | 返回当前会话发送者的 `openid`（可选附带昵称），便于排查白名单。 |
 | `/new` | 可选 `preset id` | 强制关闭当前 thread 上的流式回复（`stream_messages` DONE 帧）并取消进行中的 agent，再为同一会话目标分配下一个 thread id（`#n1`、`#n2` …）；旧 session 保留，仍可在侧边栏切换。携带 preset id 时（如 `/new code`），新会话改用该 preset 组装（先对照 host 的 preset 列表校验，未知/损坏的 id 直接报错并列出可选项，不推进 thread）；不带参数则使用 `agentPreset` 配置值。覆盖按新 session id 持久化（`qq-threads.json`），重启后恢复同一会话仍用同一 preset。 |
 | `/presets` | — | 列出 host 当前提供的全部 agent preset（id、名称、损坏原因），供 `/new <id>` 选择。 |
+| `/sessions`（别名 `/threads`） | — 或 `all` | 列出**本会话目标最近 3 天**的持久化会话：线程编号（`#0` 主会话 / `#n1`…）、创建时间、事件数、preset，并标记当前线程（接管模式下显示当前接管的会话 id）。数据来自 host 的 `sessionPersistence.list()`，按会话 id 前缀过滤本目标（C2C 用户 / 群 / 频道）。`/sessions all` 额外列出**可接管的非 QQ 会话**（web UI / 其它入口创建，最近 3 天、最多 20 个，带 `[序号]`），供 `/switch pick` 选择。两者均受 `switchAllowFrom` 权限控制。 |
+| `/switch`（别名 `/sw`） | `<n>` \| `<#nN>` \| `main` \| `pick <序号>` \| `id <会话id>` | 把当前线程指针切换到指定历史会话（如 `/switch 2`、`/switch n2`；`main` / `0` 回主会话 `#0`），下一条消息即在所选会话的历史上下文中继续；或**接管**一个非 QQ 会话（`/switch pick 3` 引用 `/sessions all` 的序号，列表 5 分钟内有效；`/switch id <完整会话id>` 直选）——接管后本目标的 QQ 消息进入该会话，沿用其 cwd 与 preset，Web 侧同时使用会共享上下文。切换/接管前自动取消离开会话上正在生成的回复并关闭其 C2C 流；线程切换只能指向已存在的线程，接管目标必须是已持久化的非 QQ 会话。指针持久化于 `qq-threads.json`（v4），重启不丢；`/new` 与任何线程切换自动解除接管。受 `switchAllowFrom` 权限控制。 |
 | `/model` | `[<provider>[/<model>]]` 或 `reset` | 切换当前线程的 AI 模型（见下节）。无参数时显示当前覆盖、host 全部 provider 及其模型清单、已配置的别名与用法；`reset` 清除覆盖回到 plugin-config 默认。切换已存在会话时自动开启新 thread（沿用 preset）。 |
 | `/compact` | — | 立即压缩当前会话历史（需 host 提供 compaction 服务）。 |
 | `/stop` | — | 关闭当前 C2C 流并中止正在生成的回复。 |
@@ -117,6 +119,57 @@ Webhook transport、热升级（`/bot-upgrade`/update-checker）、`/bot-logs`/`
 你：/model reset                          ← 清除覆盖，回到 plugin-config 默认
 ```
 
+### 会话列表与切换：`/sessions` 与 `/switch`
+
+`/new` 只会前进到新线程，旧会话此前只能在 Web 侧边栏手动找回。这对命令把找回能力放回 QQ 内：`/sessions` 通过 host 的 `sessionPersistence.list()` 快照枚举**当前会话目标**（同一 C2C 用户 / 群 / 频道）下最近 3 天创建的持久化会话；`/switch` 把线程指针指回其中任意一个，下一条消息即在那个会话的历史上下文中继续（agent 按 header 恢复，preset/model 沿用该会话创建时的记录）。
+
+**切换安全**：`/switch` 与 `/new` 走同一套收尾——取消离开线程上仍在生成的 agent、强制关闭其 C2C 流（避免 QQ `40034021` 流占用），指针写入 `qq-threads.json` 原子落盘，重启不丢。只能切换到已存在的线程（编号不超过当前最高值），切换到尚未有持久化记录的未来线程会被拒绝。
+
+**切换权限（`switchAllowFrom`）**：会话 id 内嵌 openid，且群聊里一个目标的所有成员共享线程——任意成员切换会改变整个群的对话上下文。因此两个命令都受 `switchAllowFrom` 配置控制（按**发送者 openid** 匹配，群聊即成员 openid）：
+
+- 留空 / 未配置 / `['*']`：所有人可用（默认，与 `allowFrom` 语义一致）；
+- `['disabled']`：全部拒绝；
+- `['openid1', 'openid2']`：仅列出的发送者可用（openid 可用 `/me` 查询）。
+
+**典型对话**：
+
+```text
+你：/sessions
+机器人：📋 本会话目标最近 3 天的会话（共 3 个）：
+        - #n2 ← 当前 · 创建于 2025/9/19 10:32:00 · 48 条事件 · preset=standard
+        - #n1 · 创建于 2025/9/18 21:04:11 · 12 条事件 · preset=code
+        - #0（主会话）· 创建于 2025/9/17 09:15:40 · 36 条事件
+        用 /switch <编号> 切换（如 /switch 2、/switch n2、/switch main 回主会话）
+
+你：/switch 1
+机器人：✅ 已切换到 #n1。下次发送的消息将进入 `qq:v2:c2c:ABC123#n1`，继续该会话的历史上下文。
+
+你：/switch 9
+机器人：⚠️ 会话 #n9 不存在（当前最高为 #n2）。用 /new 开启新会话，或 /sessions 查看列表。
+```
+
+### 接管 web 创建的会话：`/sessions all` 与 `/switch pick|id`
+
+`/sessions` 默认只看本 QQ 目标自己的线程；`/sessions all` 则通过 `sessionPersistence.list()` 列出**非 QQ**（`qq:` 前缀之外）的持久化会话——即 dsh web 等入口创建的会话——最近 3 天、最多 20 个，每行带 `[序号]`、创建时间、事件数、preset、cwd。`/switch pick <序号>`（列表 5 分钟内有效）或 `/switch id <完整会话id>` 把当前目标**接管（pin）**到该会话：下一条 QQ 消息进入其历史上下文，agent 按其 header 恢复（cwd、preset、模型沿用该会话的记录）；Web 侧若同时使用该会话则共享上下文。接管指针持久化于 `qq-threads.json`（存储格式升到 v4，v3 及更早自动迁移），`/new` 或任意 `/switch <线程编号|main>` 自动解除接管回到线程模式。
+
+**边界**：其它 QQ 会话目标（别的用户/群）的会话不可接管——其 id 内嵌他人 openid；接管目标必须已持久化。两个命令与线程切换一样受 `switchAllowFrom` 控制，且群聊中接管影响全体成员，建议显式配置授权名单。
+
+**典型对话**：
+
+```text
+你：/sessions all
+机器人：🗂 最近 3 天的其它会话（非 QQ，共 2 个）：
+        - [1] · 创建于 2025/9/19 09:41:23 · 128 条事件 · preset=code · cwd=/Users/xxxx/workdir
+        - [2] · 创建于 2025/9/18 18:02:10 · 12 条事件
+        用 /switch pick <序号> 接管所选会话（列表 5 分钟内有效）；/switch id <完整会话id> 亦可直选
+
+你：/switch pick 1
+机器人：✅ 已接管会话 `9f3a…`。下次发送的消息将进入该会话的历史上下文（沿用其 cwd 与 preset）。
+        其它 QQ 会话方（如 Web UI）若同时使用该会话会共享上下文；/switch main 或 /switch <编号> 可回到本目标线程。
+
+你：/switch main      ← 解除接管，回到本目标线程模式
+```
+
 **校验**：host 提供清单时，未知 provider 直接拒绝并列出可选项；未知模型予以接受但附加警告——模型 catalog 是建议性的（未列出 id 在部分适配器上原样透传），是否严格校验取决于 provider 路由自身的实现。
 
 ## 接入指南
@@ -168,7 +221,9 @@ DSH 的层顺序是：每个 bundle 的 patch → profile 的 `cordis.patch.yml`
     mediaDownload: true        # 非图片附件落盘 <cwd>/.qq-media/
     approval: true             # QQ 内联键盘审批
     approvalTimeoutMs: 300000  # 审批等待超时
-    slashCommands: true        # /help /ping /bot-ping /me /new /model /compact /stop /status 等
+    slashCommands: true        # /help /ping /bot-ping /me /new /model /sessions /switch /compact /stop /status 等
+    # switchAllowFrom: ['*']   # /sessions 与 /switch 的发送者 openid 白名单；'*' 通配、留空放行、'disabled' 全拒。
+    #                           # 群聊中按成员 openid 匹配——切换影响全体成员，建议群场景显式配置。
     # modelAliases:            # 可选：/model 命令的短名别名（短名 → "provider" 或 "provider/model"）
     #   zai: 'zai-coding-cn/glm-5.2'
     #   fast: 'openai/gpt-4o-mini'

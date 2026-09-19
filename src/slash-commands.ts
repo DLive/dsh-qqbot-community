@@ -18,12 +18,13 @@ import type {
   Config,
   IncomingMessage,
   LlmCatalogServiceLike,
+  ReplyTarget,
   SessionPersistenceService,
 } from './types.js'
 import type { LogSink } from './qqapi.js'
 import type { AlwaysAllowStore } from './store.js'
 import { ThreadStore, targetKey } from './threadstore.js'
-import { baseSessionId } from './inbound.js'
+import { baseSessionId, effectiveSessionId, resolveCurrentSessionId, SESSION_PREFIX } from './inbound.js'
 import type { OutboundPipeline } from './outbound.js'
 
 export interface SlashDeps {
@@ -65,6 +66,84 @@ export function createSlashHandler(deps: SlashDeps): SlashHandler {
       return undefined
     }
   }
+  /**
+   * Permission gate for `/sessions` and `/switch` (config.switchAllowFrom):
+   * omitted/empty or '*' allows everyone, 'disabled' denies everyone, any
+   * other list is an exact sender-openid allowlist. Gating both commands
+   * keeps session ids (which embed openids) and thread switching private
+   * to the configured operators — in a group a switch affects every member
+   * sharing the conversation target, so it is not a per-member decision.
+   */
+  const switchAllowed = (senderId: string): boolean => {
+    const allow = config.switchAllowFrom
+    if (allow === undefined || allow.length === 0) return true
+    if (allow.includes('*')) return true
+    if (allow.includes('disabled')) return false
+    return allow.includes(senderId)
+  }
+  /**
+   * Sessions persisted for the current conversation target, newest first.
+   * `undefined` when the host persistence service cannot list; each entry
+   * carries the resolved thread number (0 = bare base session id).
+   */
+  const listTargetSessions = async (target: ReplyTarget): Promise<readonly { thread: number; createdAt: number; eventCount?: number; preset?: string }[] | undefined> => {
+    if (sessionPersistence?.list === undefined) return undefined
+    try {
+      const base = baseSessionId(target)
+      const prefix = `${base}#n`
+      const snapshots = await sessionPersistence.list()
+      const own = snapshots.filter(snap => snap.header.id === base || snap.header.id.startsWith(prefix))
+      return own
+        .map(snap => {
+          const id = snap.header.id
+          const suffix = id === base ? '' : id.slice(prefix.length)
+          const thread = suffix.match(/^\d+$/) !== null ? Number(suffix) : -1
+          return { thread, createdAt: snap.header.createdAt, eventCount: snap.eventCount, preset: snap.header.agentPreset }
+        })
+        .filter(entry => entry.thread >= 0)
+        .sort((a, b) => b.thread - a.thread)
+    } catch (error) {
+      log.warn('QQ /sessions: listing persisted sessions failed: %o', error)
+      return undefined
+    }
+  }
+  /**
+   * `/sessions all` remembers its numbered rows per target for this long so
+   * `/switch pick <k>` can reference them without repeating full session ids.
+   */
+  const ALL_LISTING_TTL_MS = 5 * 60 * 1000
+  const allListings = new Map<string, { ids: string[]; expires: number }>()
+  /**
+   * Non-QQ persisted sessions (web UI / subagents' parents / any adapter other
+   * than this one), newest first, capped for one listing. Other QQ targets'
+   * conversations are deliberately excluded — their ids embed other users'
+   * openids and their contexts belong to those targets.
+   */
+  const listForeignSessions = async (): Promise<readonly { id: string; createdAt: number; eventCount?: number; preset?: string; cwd?: string }[] | undefined> => {
+    if (sessionPersistence?.list === undefined) return undefined
+    try {
+      const snapshots = await sessionPersistence.list()
+      return snapshots
+        .map(snap => ({ id: snap.header.id, createdAt: snap.header.createdAt, eventCount: snap.eventCount, preset: snap.header.agentPreset, cwd: snap.header.cwd }))
+        .filter(entry => !entry.id.startsWith(SESSION_PREFIX))
+        .sort((a, b) => b.createdAt - a.createdAt)
+        .slice(0, 20)
+    } catch (error) {
+      log.warn('QQ /sessions all: listing foreign sessions failed: %o', error)
+      return undefined
+    }
+  }
+  /** Verify a session id is actually persisted before pinning a takeover. */
+  const sessionExists = async (sessionId: string): Promise<boolean> => {
+    if (sessionPersistence === undefined) return true // cannot verify — caller warns
+    try {
+      const snapshots = await sessionPersistence.list?.()
+      if (snapshots === undefined) return true
+      return snapshots.some(snap => snap.header.id === sessionId)
+    } catch {
+      return true // verification unavailable — do not block the operator
+    }
+  }
   return async (sessionId, message, text, reply) => {
     if (!text.startsWith('/')) return false
     const [command, ...rest] = text.slice(1).split(/\s+/)
@@ -76,6 +155,8 @@ export function createSlashHandler(deps: SlashDeps): SlashHandler {
           '/me — 显示你的 openid',
           '/new [preset]（别名 /reset /clear）— 开启新会话（可选 preset id，见 /presets）',
           '/presets — 列出可用的 agent preset',
+          '/sessions — 列出本会话最近 3 天的历史会话；/sessions all 查看可接管的非 QQ 会话（受 switchAllowFrom 权限控制）',
+          '/switch <n|#nN|main|pick 序号|id 会话id> — 切换到指定会话或接管外部会话（受 switchAllowFrom 权限控制）',
           '/model [<provider>[/<model>]|reset] — 切换当前线程的 AI 模型（已有会话时自动开新会话）',
           '/compact — 压缩会话历史（摘要替换旧记录，保留上下文）',
           '/stop — 中止当前正在生成的回复',
@@ -119,6 +200,185 @@ export function createSlashHandler(deps: SlashDeps): SlashHandler {
             ...presets.map(preset => `- ${preset.id}${preset.name !== undefined ? `（${preset.name}）` : ''}${preset.broken !== undefined ? ` ⚠️ 不可用：${preset.broken}` : ''}`),
             '用 /new <id> 以指定 preset 开启新会话',
           ].join('\n'))
+        return true
+      }
+      case 'sessions':
+      case 'threads': {
+        if (!switchAllowed(message.senderId)) {
+          log.warn('QQ /sessions: denied for sender=%s by switchAllowFrom', message.senderId)
+          await reply('⚠️ 你没有查看会话列表的权限（switchAllowFrom 未授权）')
+          return true
+        }
+        if (sessionPersistence?.list === undefined) {
+          await reply('⚠️ 当前环境不支持会话列表查询（host 未提供 sessionPersistence.list）')
+          return true
+        }
+        const cutoff = Date.now() - 3 * 24 * 60 * 60 * 1000
+        const key = targetKey(message.reply)
+        // `/sessions all`: every NON-QQ persisted session from the last 3 days
+        // (web UI, other adapters' parents), addressable via /switch pick <k>.
+        if (rest[0] === 'all') {
+          const foreign = await listForeignSessions()
+          if (foreign === undefined) {
+            await reply('⚠️ 读取会话列表失败，请稍后再试')
+            return true
+          }
+          const recent = foreign.filter(entry => entry.createdAt >= cutoff)
+          if (recent.length === 0) {
+            await reply('最近 3 天没有其它（非 QQ）持久化会话')
+            return true
+          }
+          allListings.set(key, { ids: recent.map(entry => entry.id), expires: Date.now() + ALL_LISTING_TTL_MS })
+          const pinnedNow = threads.pinnedSession(key)
+          const lines: string[] = [`🗂 最近 3 天的其它会话（非 QQ，共 ${recent.length} 个）：`]
+          recent.forEach((entry, index) => {
+            const when = new Date(entry.createdAt).toLocaleString()
+            lines.push([
+              `- [${index + 1}]${entry.id === pinnedNow ? ' ← 当前接管' : ''}`,
+              `· 创建于 ${when}`,
+              entry.eventCount !== undefined ? `· ${entry.eventCount} 条事件` : '',
+              entry.preset !== undefined && entry.preset.length > 0 ? `· preset=${entry.preset}` : '',
+              entry.cwd !== undefined && entry.cwd.length > 0 ? `· cwd=${entry.cwd}` : '',
+            ].filter(part => part.length > 0).join(' '))
+          })
+          lines.push(`用 /switch pick <序号> 接管所选会话（列表 ${ALL_LISTING_TTL_MS / 60000} 分钟内有效）；/switch id <完整会话id> 亦可直选`)
+          await reply(lines.join('\n'))
+          return true
+        }
+        const all = await listTargetSessions(message.reply)
+        if (all === undefined) {
+          await reply('⚠️ 读取会话列表失败，请稍后再试')
+          return true
+        }
+        const recent = all.filter(entry => entry.createdAt >= cutoff)
+        if (recent.length === 0) {
+          await reply('本会话目标最近 3 天没有持久化的会话（用 /new 开启新会话，或 /sessions all 查看非 QQ 会话）')
+          return true
+        }
+        const currentThread = threads.current(key)
+        const pinned = threads.pinnedSession(key)
+        const lines: string[] = [`📋 本会话目标最近 3 天的会话（共 ${recent.length} 个）：`]
+        if (pinned !== undefined) {
+          lines.push(`⚠️ 当前处于接管模式：\`${pinned}\`（/switch main 或任意 /switch <编号> 可回到本目标线程）`)
+        }
+        for (const entry of recent) {
+          const label = entry.thread === 0 ? '#0（主会话）' : `#n${entry.thread}`
+          const when = new Date(entry.createdAt).toLocaleString()
+          lines.push([
+            `- ${label}${pinned === undefined && entry.thread === currentThread ? ' ← 当前' : ''}`,
+            `· 创建于 ${when}`,
+            entry.eventCount !== undefined ? `· ${entry.eventCount} 条事件` : '',
+            entry.preset !== undefined && entry.preset.length > 0 ? `· preset=${entry.preset}` : '',
+          ].filter(part => part.length > 0).join(' '))
+        }
+        lines.push('用 /switch <编号> 切换（如 /switch 2、/switch n2、/switch main 回主会话）；/sessions all 查看可接管的非 QQ 会话')
+        await reply(lines.join('\n'))
+        return true
+      }
+      case 'switch':
+      case 'sw': {
+        if (!switchAllowed(message.senderId)) {
+          log.warn('QQ /switch: denied for sender=%s by switchAllowFrom', message.senderId)
+          await reply('⚠️ 你没有切换会话的权限（switchAllowFrom 未授权）')
+          return true
+        }
+        const arg = rest[0]
+        if (arg === undefined || arg.length === 0) {
+          await reply([
+            '用法：/switch <n|#nN|main> — 切回本目标的线程（见 /sessions）',
+            '      /switch pick <序号> — 接管 /sessions all 列出的非 QQ 会话',
+            '      /switch id <完整会话id> — 直接接管指定持久化会话',
+          ].join('\n'))
+          return true
+        }
+        const key = targetKey(message.reply)
+        const currentThread = threads.current(key)
+        // Takeover forms first: `/switch pick <k>` resolves the remembered
+        // `/sessions all` listing; `/switch id <sessionId>` pins an exact id.
+        // Both route the NEXT inbound message into an arbitrary (typically
+        // web-created) persisted session, so both stay behind switchAllowFrom.
+        if (arg === 'pick' || arg === 'id') {
+          let targetId: string | undefined
+          if (arg === 'id') {
+            const raw = rest[1]
+            if (raw === undefined || raw.length === 0) {
+              await reply('⚠️ 用法：/switch id <完整会话id>（id 见 /sessions all）')
+              return true
+            }
+            targetId = raw
+          } else {
+            const index = Number(rest[1])
+            const listing = allListings.get(key)
+            if (rest[1] === undefined || !Number.isInteger(index) || index < 1) {
+              await reply('⚠️ 用法：/switch pick <序号>（序号见 /sessions all）')
+              return true
+            }
+            if (listing === undefined || Date.now() > listing.expires) {
+              await reply('⚠️ 列表已过期或不存在，请先执行 /sessions all')
+              return true
+            }
+            targetId = listing.ids[index - 1]
+            if (targetId === undefined) {
+              await reply(`⚠️ 序号超范围（共 ${listing.ids.length} 项），请重新执行 /sessions all`)
+              return true
+            }
+          }
+          if (targetId.startsWith(SESSION_PREFIX)) {
+            await reply('⚠️ 不能接管其它 QQ 会话目标的会话（只支持本目标线程与非 QQ 会话）')
+            return true
+          }
+          if (!(await sessionExists(targetId))) {
+            await reply(`⚠️ 会话 \`${targetId}\` 不存在或未持久化（用 /sessions all 查看可用清单）`)
+            return true
+          }
+          // Cancel the outgoing session's agent + stream exactly like the
+          // thread switch below, then pin the takeover.
+          const outgoingId = resolveCurrentSessionId(message.reply, threads)
+          const oldAgent: AgentLike | undefined = agents.get(outgoingId)
+          await outbound.closeStream(outgoingId).catch(() => undefined)
+          try {
+            oldAgent?.cancel({ kind: 'user' })
+          } catch (error) {
+            log.warn('failed to cancel old QQ agent on /switch %s: %o', arg, error)
+          }
+          threads.pin(key, targetId)
+          log.info('QQ /switch %s: target=%s fromSession=%s pinnedSession=%s', arg, key, outgoingId, targetId)
+          await reply([
+            `✅ 已接管会话 \`${targetId}\`。下次发送的消息将进入该会话的历史上下文（沿用其 cwd 与 preset）。`,
+            '其它 QQ 会话方（如 Web UI）若同时使用该会话会共享上下文；/switch main 或 /switch <编号> 可回到本目标线程。',
+          ].join('\n'))
+          return true
+        }
+        // Accept "2", "n2", "#n2", "#2" and the aliases main/base for thread 0.
+        const normalized = arg === 'main' || arg === 'base' ? '0' : arg.replace(/^#/, '')
+        const match = normalized.match(/^(?:n)?(\d+)$/i)
+        if (match === null) {
+          await reply(`⚠️ 无法识别的参数 "${arg}"（用法：/switch <n|#nN|main|pick <序号>|id <会话id>，见 /sessions）`)
+          return true
+        }
+        const target = Number(match[1])
+        if (target > currentThread) {
+          await reply(`⚠️ 会话 #n${target} 不存在（当前最高为 ${currentThread === 0 ? '#0（主会话）' : `#n${currentThread}`}）。用 /new 开启新会话，或 /sessions 查看列表。`)
+          return true
+        }
+        // Same safety net as /new: cancel any agent still running on the
+        // outgoing session (thread OR takeover pin) and force-close its C2C
+        // stream, so queued replies do not leak into the wrong conversation
+        // and QQ's "generating" guard does not block the incoming thread.
+        const outgoingId = resolveCurrentSessionId(message.reply, threads)
+        const oldAgent: AgentLike | undefined = agents.get(outgoingId)
+        await outbound.closeStream(outgoingId).catch(() => undefined)
+        try {
+          oldAgent?.cancel({ kind: 'user' })
+        } catch (error) {
+          log.warn('failed to cancel old QQ agent on /switch: %o', error)
+        }
+        // `set` also drops any takeover pin, returning the target to threads.
+        threads.set(key, target)
+        const newId = effectiveSessionId(message.reply, target)
+        log.info('QQ /switch: target=%s fromSession=%s toThread=%d oldAgent=%s newSessionId=%s',
+          key, outgoingId, target, oldAgent ? 'present' : 'none', newId)
+        await reply(`✅ 已切换到 ${target === 0 ? '#0（主会话）' : `#n${target}`}。下次发送的消息将进入 \`${newId}\`，继续该会话的历史上下文。`)
         return true
       }
       case 'reset':

@@ -32,6 +32,11 @@ export const Config: Schema<Config> = Schema.object({
   debug: Schema.boolean().default(false).description('调试日志'),
   allowFrom: Schema.array(Schema.string()).default(['*']).description("C2C 发送者 openid 白名单（'*' 通配，留空放行；'disabled' 关闭 C2C）"),
   groupAllowFrom: Schema.array(Schema.string()).default(['*']).description("群 openid 白名单（'disabled' 关闭群聊）"),
+  switchAllowFrom: Schema.array(Schema.string()).description(
+    "会话列表/切换权限：允许使用 /sessions 与 /switch 的发送者 openid 白名单"
+    + "（'*' 通配，留空放行；'disabled' 全部拒绝）。按发送者 openid 匹配，"
+    + "群聊中即成员 openid——群会话切换影响全体成员，建议群聊场景显式配置。",
+  ),
   requireMention: Schema.boolean().default(false).description('群聊是否需要 @bot 才触发（默认 false，对所有群消息响应）'),
   markdown: Schema.boolean().default(false).description('以 markdown (msg_type 2) 发送回复，需开通权限'),
   textChunkLimit: Schema.number().default(4000).description('单条静态回复的最大字符数'),

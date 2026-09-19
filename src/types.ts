@@ -92,8 +92,16 @@ export interface Config {
   questionTimeoutMs?: number
   /** Render single-choice questions as QQ inline-keyboard buttons (opt-in). */
   questionButtons?: boolean
-  /** Intercept /help /ping /me /approve /always /stop /compact /status /new /presets /reset /clear commands before the agent. */
+  /** Intercept /help /ping /me /approve /always /stop /compact /status /new /presets /sessions /switch /reset /clear commands before the agent. */
   slashCommands?: boolean
+  /**
+   * Sender openids allowed to list (`/sessions`) and switch (`/switch`)
+   * conversation threads. '*' wildcard (or omitted/empty) = everyone;
+   * 'disabled' = nobody; otherwise an exact openid match against the sender
+   * (works for both C2C users and group members, since a thread switch in a
+   * group affects every member sharing that conversation target).
+   */
+  switchAllowFrom?: string[]
   /**
    * Show successful tool-call results as QQ messages (errors are always shown).
    * Mirrors `showToolResults` in the reference implementation. Default: false.
@@ -286,10 +294,27 @@ export interface PersistedSessionMeta {
   readonly cwd?: string | undefined
   readonly createdAt: number
   readonly version: number
+  /** Agent preset the session's agent composes from, when the deployment records one. */
+  readonly agentPreset?: string | undefined
+}
+
+/**
+ * Lightweight structural view of one `sessionPersistence.list()` snapshot —
+ * the subset `/sessions` reads (header metadata + cheap event count).
+ */
+export interface SessionSnapshotLike {
+  readonly header: PersistedSessionMeta
+  readonly eventCount?: number
 }
 
 export interface SessionPersistenceService {
   inspect(id: string, signal?: AbortSignal): Promise<{ meta: PersistedSessionMeta; events: readonly unknown[] }>
+  /**
+   * List every stored session visible to this process (no promised order).
+   * Present on hosts running the session-persistence service with `list()`;
+   * older hosts without it leave the field absent and `/sessions` degrades.
+   */
+  list?(signal?: AbortSignal): Promise<readonly SessionSnapshotLike[]>
 }
 
 export interface WorkspaceRegistryService {

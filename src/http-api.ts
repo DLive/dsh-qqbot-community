@@ -22,7 +22,7 @@ import { timingSafeEqual } from 'node:crypto'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Config } from './config.js'
 import { chunkText } from './outbound.js'
-import { effectiveSessionId } from './inbound.js'
+import { resolveCurrentSessionId } from './inbound.js'
 import { targetKey, type ThreadStore } from './threadstore.js'
 import type { RouteStore } from './store.js'
 import type { LogSink, QQApi } from './qqapi.js'
@@ -197,7 +197,7 @@ function listChannels(deps: HttpApiDeps): ChannelRow[] {
       kind: record.target.kind,
       id: targetId(record.target),
       target: record.target,
-      currentSessionId: effectiveSessionId(record.target, deps.threads.current(key)),
+      currentSessionId: resolveCurrentSessionId(record.target, deps.threads),
       lastActiveAt: record.lastMsgAt,
     }
     const existing = byTarget.get(key)
@@ -254,7 +254,7 @@ async function handleSend(deps: HttpApiDeps, res: ServerResponse, body: Record<s
   let recordError: string | undefined
   if (body.record === true) {
     try {
-      const sessionId = effectiveSessionId(target, deps.threads.current(targetKey(target)))
+      const sessionId = resolveCurrentSessionId(target, deps.threads)
       const agent = await deps.ensureAgent(sessionId)
       agent.inject({
         id: `qqpush:${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`,

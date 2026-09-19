@@ -252,6 +252,16 @@ export function effectiveSessionId(target: ReplyTarget, thread: number): string 
   return thread === 0 ? baseSessionId(target) : `${baseSessionId(target)}#n${thread}`
 }
 
+/**
+ * The session id the NEXT inbound message for this target resolves to: the
+ * `/switch id` takeover pin when present, otherwise the current thread.
+ * Shared by the inbound pipeline and the HTTP push API so both agree.
+ */
+export function resolveCurrentSessionId(target: ReplyTarget, threads: { current(key: string): number; pinnedSession(key: string): string | undefined }): string {
+  const key = targetKey(target)
+  return threads.pinnedSession(key) ?? effectiveSessionId(target, threads.current(key))
+}
+
 /** Compatibility shim: returns the base id (thread 0) for the inbound message. */
 export function sessionIdFor(message: IncomingMessage): string {
   return baseSessionId(message.reply)
@@ -422,13 +432,17 @@ export class InboundPipeline {
       }
     }
 
-    // Resolve the effective DSH session id for this target's current thread
-    // (the /new slash command bumps the thread counter so the next inbound
-    // message lands in a fresh session). The base id is unchanged for
-    // thread 0, so existing sessions keep their ids.
-    const thread = this.deps.threads.current(targetKey(message.reply))
-    const sessionId = effectiveSessionId(message.reply, thread)
-    this.deps.log.info('QQ inbound: id=%s kind=%s sender=%s thread=%d sessionId=%s', message.id, message.kind, message.senderId, thread, sessionId)
+    // Resolve the effective DSH session id for this target: the `/switch id`
+    // takeover pin (an arbitrary, possibly web-created session) when present,
+    // otherwise the target's current thread (the /new slash command bumps the
+    // thread counter so the next inbound lands in a fresh session; thread 0
+    // keeps the bare base id, so existing sessions keep their ids).
+    const key = targetKey(message.reply)
+    const pinned = this.deps.threads.pinnedSession(key)
+    const thread = this.deps.threads.current(key)
+    const sessionId = resolveCurrentSessionId(message.reply, this.deps.threads)
+    this.deps.log.info('QQ inbound: id=%s kind=%s sender=%s thread=%d%s sessionId=%s',
+      message.id, message.kind, message.senderId, thread, pinned !== undefined ? ` (pinned=${pinned})` : '', sessionId)
 
     // Slash commands are checked before any routing bookkeeping so /new
     // doesn't disturb the previous thread's anchor and /help /ping /me
