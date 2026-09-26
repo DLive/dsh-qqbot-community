@@ -46,7 +46,7 @@
     "build": "tsc",
     "clean": "rm -rf lib *.tsbuildinfo",
     "prepublishOnly": "pnpm run clean && pnpm run build",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "tsc && node --test test/*.test.mjs"
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "^3.18.1",

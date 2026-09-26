@@ -74,6 +74,7 @@ export function nextMsgSeq(): number {
 
 export class QQApi {
   private token: string | undefined
+  private tokenExpiresAt = 0
   private tokenRefresh: Promise<string> | undefined
   private refreshTimer: NodeJS.Timeout | undefined
   private disposed = false
@@ -103,11 +104,24 @@ export class QQApi {
     if (this.refreshTimer !== undefined) clearTimeout(this.refreshTimer)
   }
 
-  /** Obtain a valid access token, refreshing when missing. */
+  /** Obtain a valid access token, sharing any in-flight refresh. */
   async ensureToken(): Promise<string> {
-    if (this.token !== undefined) return this.token
+    if (this.disposed) throw new Error('QQApi disposed')
+    if (this.token !== undefined && Date.now() < this.tokenExpiresAt) return this.token
+    return this.refreshTokenOnce()
+  }
+
+  private refreshTokenOnce(): Promise<string> {
     if (this.tokenRefresh === undefined) {
-      this.tokenRefresh = this.refreshToken().finally(() => { this.tokenRefresh = undefined })
+      this.tokenRefresh = this.refreshToken()
+        .catch((error: unknown) => {
+          if (!this.disposed) {
+            this.log.error('QQ token refresh failed: %o', error)
+            this.scheduleRetry()
+          }
+          throw error
+        })
+        .finally(() => { this.tokenRefresh = undefined })
     }
     return this.tokenRefresh
   }
@@ -145,9 +159,13 @@ export class QQApi {
         data,
       )
     }
+    if (this.disposed) throw new Error('QQApi disposed')
+    const expiresIn = typeof data.expires_in === 'number' && Number.isFinite(data.expires_in)
+      ? Math.max(0, data.expires_in) : 300
     this.token = data.access_token
-    const expiresIn = typeof data.expires_in === 'number' ? data.expires_in : 300
-    this.scheduleRefresh(Math.max(60, expiresIn - 60) * 1_000)
+    this.tokenExpiresAt = Date.now() + expiresIn * 1_000
+    // Refresh early, but never treat an expired token as valid while retrying.
+    this.scheduleRefresh(Math.max(1_000, (expiresIn - 60) * 1_000))
     this.onTokenReady?.()
     return this.token
   }
@@ -157,16 +175,14 @@ export class QQApi {
     if (this.refreshTimer !== undefined) clearTimeout(this.refreshTimer)
     this.refreshTimer = setTimeout(() => {
       this.refreshTimer = undefined
-      this.token = undefined
-      void this.ensureToken().catch((error: unknown) => {
-        this.log.error('QQ token refresh failed: %o', error)
-        this.refreshTimer = setTimeout(() => {
-          this.refreshTimer = undefined
-          this.token = undefined
-          void this.ensureToken().catch(() => undefined)
-        }, TOKEN_RETRY_MS)
-      })
+      // Keep the current token usable until it actually expires. A failed
+      // refresh schedules another attempt rather than stopping after one retry.
+      void this.refreshTokenOnce().catch(() => undefined)
     }, delayMs)
+  }
+
+  private scheduleRetry(): void {
+    this.scheduleRefresh(TOKEN_RETRY_MS)
   }
 
   /** Authenticated raw request used by every method and by the qq_api tool. */

@@ -76,7 +76,9 @@ export class QQGateway {
     } catch {
       // First run or unreadable file: start a fresh session.
     }
-    void this.api.ensureToken().then(() => { void this.connect() }, () => undefined)
+    // connect() already retries token/network failures with backoff. Do not
+    // swallow the first token error here or startup may never reach the gateway.
+    void this.connect()
   }
 
   dispose(): void {
