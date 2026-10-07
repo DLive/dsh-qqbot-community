@@ -192,33 +192,48 @@ export class QQApi {
     body?: unknown,
     options?: { query?: Record<string, string>; timeoutMs?: number },
   ): Promise<unknown> {
-    const token = await this.ensureToken()
     const url = new URL(`${this.resolveEndpoint()}${path}`)
     for (const [key, value] of Object.entries(options?.query ?? {})) url.searchParams.set(key, value)
-    const response = await fetch(url, {
-      method,
-      headers: {
-        Authorization: `QQBot ${token}`,
-        ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
-      },
-      body: body !== undefined ? JSON.stringify(body) : undefined,
-      signal: AbortSignal.timeout(options?.timeoutMs ?? REQUEST_TIMEOUT_MS),
-    })
-    const text = await response.text()
-    let parsed: unknown
-    try {
-      parsed = text.length > 0 ? JSON.parse(text) : undefined
-    } catch {
-      parsed = text
+    const payload = body !== undefined ? JSON.stringify(body) : undefined
+    for (let attempt = 0; ; attempt += 1) {
+      const token = await this.ensureToken()
+      const response = await fetch(url, {
+        method,
+        headers: {
+          Authorization: `QQBot ${token}`,
+          ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+        },
+        body: payload,
+        signal: AbortSignal.timeout(options?.timeoutMs ?? REQUEST_TIMEOUT_MS),
+      })
+      const text = await response.text()
+      let parsed: unknown
+      try {
+        parsed = text.length > 0 ? JSON.parse(text) : undefined
+      } catch {
+        parsed = text
+      }
+      if (response.status === 401) {
+        // The server can invalidate a token before its local expiry. A late
+        // response for an older token must not evict a newer cached token.
+        if (this.token === token) {
+          this.token = undefined
+          this.tokenExpiresAt = 0
+        }
+        if (attempt === 0) {
+          this.log.warn('QQ %s %s returned HTTP 401; refreshing access token and retrying once', method, path)
+          continue
+        }
+      }
+      if (!response.ok) {
+        throw new QQApiError(
+          `QQ ${method} ${path} failed: HTTP ${response.status} ${text.slice(0, 300)}`,
+          response.status,
+          parsed,
+        )
+      }
+      return parsed
     }
-    if (!response.ok) {
-      throw new QQApiError(
-        `QQ ${method} ${path} failed: HTTP ${response.status} ${text.slice(0, 300)}`,
-        response.status,
-        parsed,
-      )
-    }
-    return parsed
   }
 
   // ── Message senders ────────────────────────────────────────────────────────

@@ -118,18 +118,15 @@ export class QQGateway {
 
   private async connect(): Promise<void> {
     if (this.disposed || this.connecting) return
-    let token: string
-    try {
-      token = await this.api.ensureToken()
-    } catch {
-      this.scheduleReconnect()
-      return
-    }
     if (this.socket?.readyState === WebSocket.OPEN || this.socket?.readyState === WebSocket.CONNECTING) return
 
     this.connecting = true
     try {
+      // gatewayUrl() can recover from a 401 by refreshing the token. Read the
+      // token afterwards so IDENTIFY/RESUME cannot retain the rejected one.
       const url = await this.api.gatewayUrl()
+      const token = await this.api.ensureToken()
+      if (this.disposed) return
       const socket = new WebSocket(url)
       this.socket = socket
       socket.on('open', () => {

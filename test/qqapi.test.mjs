@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { QQApi } from '../lib/qqapi.js'
+import { QQApi, QQApiError } from '../lib/qqapi.js'
+import { WebSocketServer } from 'ws'
 import { QQGateway } from '../lib/gateway.js'
+
+function apiResponse(status, body) {
+  return { ok: status >= 200 && status < 300, status, text: async () => JSON.stringify(body) }
+}
 
 function tokenResponse(token, expiresIn = 300) {
   return { ok: true, json: async () => ({ access_token: token, expires_in: expiresIn }) }
@@ -49,6 +54,118 @@ function createApi(errors) {
     info() {}, warn() {}, error: (...args) => { errors.push(args) },
   })
 }
+
+test('401 refreshes an unexpired token and replays the same request once', async () => {
+  await withMocks(async () => {
+    const api = createApi([])
+    const requests = []
+    let tokenRequests = 0
+    globalThis.fetch = async (url, options) => {
+      if (String(url).includes('getAppAccessToken')) return tokenResponse(++tokenRequests === 1 ? 'old' : 'new')
+      requests.push({ url: String(url), ...options })
+      return requests.length === 1
+        ? apiResponse(401, { code: 11244, err_code: 40011027 })
+        : apiResponse(200, { id: 'sent' })
+    }
+    try {
+      assert.deepEqual(await api.request('POST', '/messages', { msg_seq: 7 }, { query: { test: '1' } }), { id: 'sent' })
+      assert.equal(tokenRequests, 2)
+      assert.equal(requests.length, 2)
+      assert.equal(requests[0].headers.Authorization, 'QQBot old')
+      assert.equal(requests[1].headers.Authorization, 'QQBot new')
+      assert.equal(requests[0].url, requests[1].url)
+      assert.equal(requests[0].body, requests[1].body)
+    } finally { api.dispose() }
+  })
+})
+
+test('repeated 401 is bounded and leaves the rejected token invalidated', async () => {
+  await withMocks(async () => {
+    const api = createApi([])
+    let tokenRequests = 0
+    let requests = 0
+    globalThis.fetch = async (url) => {
+      if (String(url).includes('getAppAccessToken')) return tokenResponse(`token-${++tokenRequests}`)
+      requests++
+      return apiResponse(401, { code: 11244 })
+    }
+    try {
+      await assert.rejects(api.request('GET', '/gateway'), (error) => error instanceof QQApiError && error.status === 401 && error.body.code === 11244)
+      assert.equal(requests, 2)
+      assert.equal(tokenRequests, 2)
+      assert.equal(await api.ensureToken(), 'token-3')
+    } finally { api.dispose() }
+  })
+})
+
+test('late concurrent 401 does not invalidate a newer token', async () => {
+  await withMocks(async () => {
+    const api = createApi([])
+    let tokenRequests = 0
+    let rejectLate
+    globalThis.fetch = async (url, options) => {
+      if (String(url).includes('getAppAccessToken')) return tokenResponse(++tokenRequests === 1 ? 'old' : 'new')
+      if (options.headers.Authorization === 'QQBot new') return apiResponse(200, { ok: true })
+      if (String(url).endsWith('/late')) return new Promise((resolve) => { rejectLate = () => resolve(apiResponse(401, { code: 11244 })) })
+      return apiResponse(401, { code: 11244 })
+    }
+    try {
+      await api.ensureToken()
+      const late = api.request('GET', '/late')
+      await flush()
+      await api.request('GET', '/first')
+      rejectLate()
+      await late
+      assert.equal(tokenRequests, 2)
+    } finally { api.dispose() }
+  })
+})
+
+test('non-authentication errors are not retried', async () => {
+  await withMocks(async () => {
+    const api = createApi([])
+    let requests = 0
+    globalThis.fetch = async (url) => {
+      if (String(url).includes('getAppAccessToken')) return tokenResponse('valid')
+      requests++
+      return apiResponse(403, { message: 'permission denied' })
+    }
+    try {
+      await assert.rejects(api.request('GET', '/gateway'), (error) => error.status === 403)
+      assert.equal(requests, 1)
+    } finally { api.dispose() }
+  })
+})
+
+test('gateway identifies with the token obtained after gateway discovery', async () => {
+  const server = new WebSocketServer({ port: 0, host: '127.0.0.1' })
+  await new Promise((resolve) => server.once('listening', resolve))
+  let currentToken = 'old'
+  const api = {
+    ensureToken: async () => currentToken,
+    gatewayUrl: async () => {
+      currentToken = 'new'
+      return `ws://127.0.0.1:${server.address().port}`
+    },
+  }
+  const gateway = new QQGateway({}, api, { onMessage() {}, onInteraction() {} }, {
+    info() {}, warn() {}, error() {},
+  }, '/nonexistent-qq-gateway-session-test.json')
+  const identified = new Promise((resolve) => server.once('connection', (socket) => {
+    socket.once('message', (raw) => resolve(JSON.parse(raw.toString())))
+    socket.send(JSON.stringify({ op: 10, d: { heartbeat_interval: 30_000 } }))
+  }))
+  try {
+    await gateway.start()
+    const frame = await identified
+    assert.equal(frame.op, 2)
+    assert.equal(frame.d.token, 'QQBot new')
+  } finally {
+    gateway.dispose()
+    for (const socket of server.clients) socket.terminate()
+    await new Promise((resolve) => server.close(resolve))
+  }
+})
 
 test('refresh keeps a still-valid token and retries every failure until recovery', async () => {
   await withMocks(async ({ timers, fire, setNow }) => {
@@ -109,7 +226,10 @@ test('gateway retries when the first token request fails on startup', async () =
         if (++attempts === 1) throw new Error('offline')
         return 'recovered'
       },
-      gatewayUrl: async () => { throw new Error('gateway unavailable') },
+      gatewayUrl: async () => {
+        await api.ensureToken()
+        throw new Error('gateway unavailable')
+      },
     }
     const gateway = new QQGateway({}, api, { onMessage() {}, onInteraction() {} }, {
       info() {}, warn() {}, error() {},
